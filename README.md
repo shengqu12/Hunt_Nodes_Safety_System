@@ -1,4 +1,4 @@
-# lidar-node-guardian
+# Hunt_Nodes_Safety_System
 
 Staged power-up and fleet-wide health monitoring for ceiling-LiDAR Jetson
 nodes (Livox MID-360/360S on Jetson Nano, CMU Hunt Library deployment).
@@ -47,7 +47,7 @@ Safety properties:
 ## Install on a Jetson
 
 ```bash
-git clone https://github.com/<you>/lidar-node-guardian.git
+git clone https://github.com/shengqu12/Hunt_Nodes_Safety_System.git
 cd lidar-node-guardian
 sudo ./install_node.sh
 sudo nano /opt/lidar-guardian/config/guardian.env   # NODE_NAME, LIDAR_IP, POWER_BACKEND
@@ -77,7 +77,7 @@ To auto-start the pipeline after the LiDAR is up, set `AUTO_START_CMD` in
 ## Install on the lab server
 
 ```bash
-git clone https://github.com/<you>/lidar-node-guardian.git
+git clone https://github.com/shengqu12/Hunt_Nodes_Safety_System.git
 cd lidar-node-guardian
 ./install_server.sh
 nano ~/lidar-node-guardian/config/nodes.list   # tailscale status → IPs
