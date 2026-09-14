@@ -1,0 +1,14 @@
+# ~/.msmtprc on the lab server (chmod 600). Example: Gmail with an app password.
+# Install: sudo apt install msmtp msmtp-mta
+defaults
+auth           on
+tls            on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
+logfile        ~/.msmtp.log
+
+account        default
+host           smtp.gmail.com
+port           587
+from           yourlab.alerts@gmail.com
+user           yourlab.alerts@gmail.com
+password       your-16-char-app-password

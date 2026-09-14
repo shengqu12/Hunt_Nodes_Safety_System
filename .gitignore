@@ -1,0 +1,4 @@
+config/guardian.env
+config/server.env
+config/nodes.list
+*.log

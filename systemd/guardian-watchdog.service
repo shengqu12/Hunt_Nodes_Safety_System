@@ -1,0 +1,8 @@
+[Unit]
+Description=LiDAR Guardian health check
+After=guardian-boot.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/lidar-guardian/bin/watchdog.sh
+TimeoutStartSec=300

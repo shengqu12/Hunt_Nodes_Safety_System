@@ -1,0 +1,5 @@
+# nodes.list — one line per Jetson the server monitors.
+# Format: <name> <tailscale_ip> <ssh_user>
+# Get Tailscale IPs with: tailscale status
+node1 100.x.y.z jetson
+# node3 100.x.y.w jetson

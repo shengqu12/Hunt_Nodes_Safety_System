@@ -1,0 +1,7 @@
+[Unit]
+Description=LiDAR Guardian fleet monitor (lab server)
+
+[Service]
+Type=oneshot
+ExecStart=%h/lidar-node-guardian/server/monitor.sh
+Environment=GUARDIAN_HOME=%h/lidar-node-guardian

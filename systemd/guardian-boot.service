@@ -1,0 +1,13 @@
+[Unit]
+Description=LiDAR Guardian staged boot sequence (Jetson first, LiDAR after stable)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/lidar-guardian/bin/boot_sequence.sh
+TimeoutStartSec=600
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
