@@ -94,6 +94,17 @@ if (( fails < FAIL_THRESHOLD )); then
     exit 0
 fi
 
+# Monitor-only mode: no switch hardware — alert instead of cycling.
+if [[ "${POWER_BACKEND:-cmd}" == "none" ]]; then
+    if [[ "$(state_get lidar_status)" != "failed" ]]; then
+        state_set lidar_status failed
+        node_alert "LiDAR DOWN on ${NODE_NAME:-node} (monitor-only, no auto-recovery)" \
+            "$reason. POWER_BACKEND=none: no switch hardware installed, cannot power-cycle. Manual intervention needed."
+    fi
+    write_status "failed" "complete" "$reason — monitor-only, no power backend"
+    exit 0
+fi
+
 cycles=$(state_get cycles_in_window 0)
 if (( cycles < MAX_POWER_CYCLES )); then
     state_set cycles_in_window $(( cycles + 1 ))

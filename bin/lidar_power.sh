@@ -15,6 +15,11 @@ ACTION="${1:-}"
 do_switch() {  # do_switch on|off
     local want="$1"
     case "${POWER_BACKEND:-cmd}" in
+        none)
+            # Monitor-only mode: no switch hardware installed yet.
+            log INFO "POWER_BACKEND=none — no switch hardware, skipping '$want'"
+            return 0
+            ;;
         usbrelay)
             # HID relay boards (lsusb shows 16c0:05df "Van Ooijen ... HID device").
             # RELAY_ID looks like "HURTM_1"; usbrelay HURTM_1=1 turns it on.
