@@ -1,5 +1,10 @@
 # Hunt_Nodes_Safety_System
 
+> **Fleet reference:** the authoritative hardware/network document is
+> [`docs/hardware_network.md`](docs/hardware_network.md) in this repo.
+> The copies on Google Drive (`hardware_network.md`, `hardware_network_v2.md`)
+> are **archived and out of date** — do not operate from them.
+
 Staged power-up and fleet-wide health monitoring for ceiling-LiDAR Jetson
 nodes (Livox MID-360/360S on Jetson Nano, CMU Hunt Library deployment).
 
