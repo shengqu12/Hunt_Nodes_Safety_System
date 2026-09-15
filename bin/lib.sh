@@ -70,8 +70,17 @@ node_alert() {  # node_alert "SUBJECT" "BODY"
     local subject="$1" body="$2"
     log ALERT "$subject — $body"
     if [[ -n "${SLACK_WEBHOOK_URL:-}" ]]; then
-        curl -m 10 -s -X POST -H 'Content-type: application/json' \
-            --data "{\"text\":\"[${NODE_NAME:-node}] $subject\n$body\"}" \
-            "$SLACK_WEBHOOK_URL" >/dev/null 2>&1 || log WARN "Slack webhook failed"
+        local payload
+        payload=$(SLACK_TEXT="[${NODE_NAME:-node}] $subject
+$body" python3 -c \
+            'import json,os; print(json.dumps({"text": os.environ["SLACK_TEXT"]}))' \
+            2>/dev/null)
+        if [[ -n "$payload" ]]; then
+            curl -m 10 -s -X POST -H 'Content-type: application/json' \
+                --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null 2>&1 \
+                || log WARN "Slack webhook failed"
+        else
+            log WARN "Slack payload build failed (python3 missing?)"
+        fi
     fi
 }

@@ -31,7 +31,29 @@ if [[ -n "${MAIL_TO:-}" ]] && command -v msmtp >/dev/null; then
 fi
 
 if [[ -n "${SLACK_WEBHOOK_URL:-}" ]]; then
-    curl -m 10 -s -X POST -H 'Content-type: application/json' \
-        --data "{\"text\":\"*[LiDAR Guardian]* $SUBJECT\n$BODY\"}" \
-        "$SLACK_WEBHOOK_URL" >/dev/null 2>&1 || true
+    # Build the payload with proper JSON escaping. Alert bodies can contain
+    # quotes, braces and newlines (e.g. an embedded status.json); string
+    # interpolation produced invalid JSON and Slack silently rejected it.
+    payload=$(SLACK_TEXT="*[LiDAR Guardian]* $SUBJECT
+$BODY" python3 -c \
+        'import json,os; print(json.dumps({"text": os.environ["SLACK_TEXT"]}))' \
+        2>/dev/null)
+
+    if [[ -z "$payload" ]]; then
+        # python3 unavailable: escape backslash, quote and newline by hand.
+        esc=$(printf '%s\n%s' "*[LiDAR Guardian]* $SUBJECT" "$BODY" \
+              | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'BEGIN{ORS=""}{print NR>1?"\\n":""; print}')
+        payload="{\"text\":\"$esc\"}"
+    fi
+
+    slack_out=$(curl -m 10 -s -w '\n%{http_code}' -X POST \
+        -H 'Content-type: application/json' --data "$payload" \
+        "$SLACK_WEBHOOK_URL" 2>&1)
+    slack_code=$(tail -1 <<< "$slack_out")
+    if [[ "$slack_code" != "200" ]]; then
+        # Never block on a failed notification, but never fail silently either:
+        # a dropped alert that leaves no trace is worse than no alerting.
+        echo "$STAMP Slack delivery FAILED (http=$slack_code): $(head -1 <<< "$slack_out")" \
+            >> "${SERVER_STATE_DIR:-$HOME/.lidar-guardian-server}/alerts.log"
+    fi
 fi

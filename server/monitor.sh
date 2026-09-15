@@ -105,7 +105,7 @@ while read -r name ip user; do
     if [[ "$lidar" == "failed" ]]; then
         alert_once "lidar_$name" \
             "LIDAR DOWN on $name — needs manual attention" \
-            "$name reports lidar_status=failed: automatic power cycles were exhausted. Full status: $status_json"
+            "$name reports lidar_status=failed: automatic power cycles were exhausted (or POWER_BACKEND=none). Check the node directly."
     elif [[ "$lidar" == "ok" ]]; then
         recover_if_active "lidar_$name" \
             "RECOVERED: LiDAR on $name healthy" "$name reports lidar_status=ok."
