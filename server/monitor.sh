@@ -72,7 +72,9 @@ while read -r name ip user; do
     fi
 
     # ---- 2. read the node's status.json over SSH ----------------------------
-    status_json=$(timeout 15 ssh -o BatchMode=yes -o ConnectTimeout=5 \
+    # -n is REQUIRED: without it ssh inherits this loop's stdin (nodes.list)
+    # and swallows every remaining node, so only the first node is ever checked.
+    status_json=$(timeout 15 ssh -n -o BatchMode=yes -o ConnectTimeout=5 \
         "$user@$ip" "cat ${NODE_STATE_DIR:-/var/lib/lidar-guardian}/status.json" 2>/dev/null)
 
     if [[ -z "$status_json" ]]; then
