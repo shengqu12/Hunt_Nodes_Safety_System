@@ -36,21 +36,31 @@ while read -r name ip user; do
         continue
     fi
 
-    # One SSH per node collecting everything, -n so it cannot eat this loop's
-    # stdin (see README: the bug that once limited monitoring to node1).
+    # One SSH per node. The remote emits three fixed lines — no separator
+    # tokens: `echo` supplies its own newline, so a literal marker plus a
+    # substitution produced two newlines and shifted every field by a line.
+    # Line 1 status.json (or empty), line 2 bound/unbound, line 3 recorder.
+    # -n so ssh cannot eat this loop's stdin (see README).
+    #
+    # RECORDER_PATTERN's first character is bracketed before it reaches the
+    # remote: the whole script arrives as `bash -c "<text>"`, so the pattern
+    # appears in the remote shell's own command line and pgrep -f matches
+    # itself. [r]os2 matches the real process but not the literal text.
+    pat="${RECORDER_PATTERN:-ros2 bag record}"
+    pat_safe="[${pat:0:1}]${pat:1}"
+
     out=$(timeout 30 ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$user@$ip" "
-        cat $NODE_STATE/status.json 2>/dev/null | tr -d '\n'
-        echo '<<SPLIT>>'
-        # Driver handshake: UDP 56301 bound is reliable regardless of DDS.
+        cat $NODE_STATE/status.json 2>/dev/null | tr -d '\n' | sed 's/\$/\n/'
         (ss -uln 2>/dev/null | grep -q ':56301 ' && echo bound) || echo unbound
-        echo '<<SPLIT>>'
-        # Recording: configurable pattern, reported as-is.
-        pgrep -fa '${RECORDER_PATTERN:-ros2 bag record}' 2>/dev/null | head -1
+        pgrep -fa \"$pat_safe\" 2>/dev/null | head -1
+        echo
     " 2>/dev/null)
 
-    json=$(sed -n '1p' <<< "${out//<<SPLIT>>/$'\n'}")
-    bound=$(sed -n '2p' <<< "${out//<<SPLIT>>/$'\n'}")
-    rec=$(sed -n '3p' <<< "${out//<<SPLIT>>/$'\n'}")
+    json=$(sed -n '1p' <<< "$out")
+    bound=$(sed -n '2p' <<< "$out")
+    rec=$(sed -n '3p' <<< "$out")
+    # A node that answers ping but returns nothing usable is worth flagging.
+    [[ -z "$json" && -z "$bound" ]] && bound="unreachable-shell"
     echo "$name|up|$json|$bound|$rec" >> "$RAW"
 done < "$NODES"
 
