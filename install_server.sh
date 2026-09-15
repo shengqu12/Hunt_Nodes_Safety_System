@@ -22,9 +22,12 @@ done
 
 mkdir -p "$HOME/.config/systemd/user"
 cp "$DEST/systemd/guardian-monitor.service" \
-   "$DEST/systemd/guardian-monitor.timer" "$HOME/.config/systemd/user/"
+   "$DEST/systemd/guardian-monitor.timer" \
+   "$DEST/systemd/guardian-report.service" \
+   "$DEST/systemd/guardian-report.timer" "$HOME/.config/systemd/user/"
 systemctl --user daemon-reload
 systemctl --user enable --now guardian-monitor.timer
+systemctl --user enable --now guardian-report.timer
 # Keep user services running when not logged in:
 loginctl enable-linger "$USER" 2>/dev/null || true
 

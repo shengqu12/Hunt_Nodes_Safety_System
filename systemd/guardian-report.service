@@ -1,0 +1,7 @@
+[Unit]
+Description=LiDAR Guardian daily morning brief
+
+[Service]
+Type=oneshot
+ExecStart=%h/lidar-node-guardian/server/daily_report.sh
+Environment=GUARDIAN_HOME=%h/lidar-node-guardian

@@ -111,6 +111,30 @@ line to `nodes.list`. Done.
 | Disk N% full | node | Check for leftover rosbags |
 | RECOVERED: … | both | Matching all-clear for any of the above |
 
+## Daily morning brief
+
+`guardian-report.timer` posts one Slack message at 08:30 with fleet health,
+overnight alerts (and any still unresolved), what is recording, and the worst
+disk/temperature figures. A healthy day is two or three lines; problems expand.
+
+The brief is also the monitor's own heartbeat — if puget or the monitor dies,
+no brief arrives, so silence stops being indistinguishable from health.
+
+Test it without sending: `server/daily_report.sh --print`.
+Set `RECORDER_PATTERN` in `server.env` to match how you actually launch
+recording, or the "Recording" line will be wrong.
+
+## Gotcha: ssh inside a `while read` loop
+
+`monitor.sh` and `daily_report.sh` call `ssh -n`. Without `-n`, ssh inherits
+the loop's stdin, swallows the remaining lines of `nodes.list`, and the loop
+exits after the first node — monitoring silently covers one node while looking
+completely healthy. This bug shipped once; do not reintroduce it.
+
+`-n` is only needed inside `while read` loops. In a `for` loop it is harmful:
+it points stdin at /dev/null and cuts off any script you are piping to the
+remote host.
+
 ## Files
 
 ```
