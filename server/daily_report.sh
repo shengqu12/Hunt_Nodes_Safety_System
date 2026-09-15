@@ -93,7 +93,9 @@ for line in raw:
     issues = []
     if lidar not in ("ok",):
         issues.append(f"lidar={lidar}")
-    if bound != "bound":
+    if bound == "unreachable-shell":
+        issues.append("pings but SSH returned nothing — node may be half-up")
+    elif bound != "bound":
         issues.append("driver handshake down (56301 unbound)")
     if age is not None and age > 300:
         issues.append(f"heartbeat {age//60} min stale")
