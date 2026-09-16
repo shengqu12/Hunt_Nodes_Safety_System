@@ -17,6 +17,8 @@ GUARDIAN_HOME="${GUARDIAN_HOME:-$(dirname "$SCRIPT_DIR")}"
 NODES="$GUARDIAN_HOME/config/nodes.list"
 # shellcheck disable=SC1090
 source "$GUARDIAN_HOME/config/server.env"
+# shellcheck disable=SC1090
+source "$SCRIPT_DIR/recording_status.sh"
 STATE_DIR="${SERVER_STATE_DIR:-$HOME/.lidar-guardian-server}"
 ALERTS_LOG="$STATE_DIR/alerts.log"
 NODE_STATE="${NODE_STATE_DIR:-/var/lib/lidar-guardian}"
@@ -27,7 +29,7 @@ DRY_RUN=0
 RAW="$(mktemp)"
 trap 'rm -f "$RAW"' EXIT
 
-# ---- gather, one line per node: name|reachable|json|rate|recording --------
+# ---- gather, one line per node: name|reachable|json|bound ------------------
 while read -r name ip user; do
     [[ -z "$name" || "$name" =~ ^# ]] && continue
 
@@ -36,47 +38,73 @@ while read -r name ip user; do
         continue
     fi
 
-    # One SSH per node. The remote emits three fixed lines — no separator
+    # One SSH per node. The remote emits two fixed lines — no separator
     # tokens: `echo` supplies its own newline, so a literal marker plus a
     # substitution produced two newlines and shifted every field by a line.
-    # Line 1 status.json (or empty), line 2 bound/unbound, line 3 recorder.
+    # Line 1 status.json (or empty), line 2 bound/unbound.
     # -n so ssh cannot eat this loop's stdin (see README).
     #
-    # RECORDER_PATTERN's first character is bracketed before it reaches the
-    # remote: the whole script arrives as `bash -c "<text>"`, so the pattern
-    # appears in the remote shell's own command line and pgrep -f matches
-    # itself. [r]os2 matches the real process but not the literal text.
-    pat="${RECORDER_PATTERN:-ros2 bag record}"
-    pat_safe="[${pat:0:1}]${pat:1}"
-
+    # There used to be a third line here: `pgrep -f "$RECORDER_PATTERN"`,
+    # looking for the recorder ON THE NODE. No recorder has ever run on a
+    # Jetson — record_supervisor.py runs on the lab server and subscribes over
+    # the network — so that line could only ever come back empty and the brief
+    # could only ever print "Recording: none active". It is now measured where
+    # recording actually happens; see recording_status.sh.
     out=$(timeout 30 ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$user@$ip" "
         cat $NODE_STATE/status.json 2>/dev/null | tr -d '\n' | sed 's/\$/\n/'
         (ss -uln 2>/dev/null | grep -q ':56301 ' && echo bound) || echo unbound
-        pgrep -fa \"$pat_safe\" 2>/dev/null | head -1
         echo
     " 2>/dev/null)
 
     json=$(sed -n '1p' <<< "$out")
     bound=$(sed -n '2p' <<< "$out")
-    rec=$(sed -n '3p' <<< "$out")
     # A node that answers ping but returns nothing usable is worth flagging.
     [[ -z "$json" && -z "$bound" ]] && bound="unreachable-shell"
-    echo "$name|up|$json|$bound|$rec" >> "$RAW"
+    echo "$name|up|$json|$bound" >> "$RAW"
 done < "$NODES"
 
+# ---- recording: measured on the lab server, which is where it runs --------
+REC_RAW="$(recording_probe)"
+rk() { sed -n "s/^$1=//p" <<< "$REC_RAW" | head -1; }
+REC_UNIT="${RECORD_START_TIMER:-lidar-record-start.timer}"
+
+rec_session="$(rk SESSION)"
+if [[ "$(rk CONFIG)" != "ok" ]]; then
+    REC_LINE="*Recording:* not checked — $(rk CONFIG_PATH) is unreadable"
+elif [[ -n "$rec_session" && "$rec_session" != "none" ]]; then
+    REC_LINE="*Recording:* $rec_session — record_supervisor.py on $(hostname -s)"
+elif [[ "$(rk IN_WINDOW)" == "yes" ]]; then
+    # Scheduled to be recording, and not. Name every measured reason; the
+    # reasons are independent and more than one can be true at once.
+    REC_LINE=":rotating_light: *Recording: NOT RUNNING* — scheduled now ($(rk WINDOW) $(rk DAYS))"
+    [[ "$(rk START_TIMER)" != "active" ]] && \
+        REC_LINE+=$'\n'"    $REC_UNIT is $(rk START_TIMER) (unit file: $(rk START_TIMER_ENABLED)) — nothing will fire it"
+    [[ "$(rk REFUSED)" == "yes" ]] && \
+        REC_LINE+=$'\n'"    start refused $(rk REFUSED_AT): $(rk REFUSED_TEXT)"
+    free_gb="$(rk FREE_GB)"; need_gb="$(rk START_THRESHOLD_GB)"
+    if [[ "$free_gb" != "unknown" ]] && (( free_gb < need_gb )); then
+        REC_LINE+=$'\n'"    ${free_gb} GB free < ${need_gb} GB needed to start a day"
+    fi
+elif [[ "$(rk IN_WINDOW)" == "no" ]]; then
+    REC_LINE="*Recording:* idle, as scheduled ($(rk WINDOW) $(rk DAYS); today is $(rk TODAY))"
+else
+    REC_LINE="*Recording:* no session running; could not determine whether one is due"
+fi
+[[ "$(rk EXCLUDED)" != "none" && -n "$(rk EXCLUDED)" ]] && \
+    REC_LINE+=$'\n'"    start-gate exclusions: $(rk EXCLUDED) (these nodes cannot veto a start)"
+
 # ---- assemble the message -------------------------------------------------
-REPORT=$(RAW_FILE="$RAW" ALERTS="$ALERTS_LOG" python3 <<'PY'
+REPORT=$(RAW_FILE="$RAW" ALERTS="$ALERTS_LOG" REC_LINE="$REC_LINE" python3 <<'PY'
 import os, json, re, datetime
 
 raw = open(os.environ["RAW_FILE"]).read().strip().splitlines()
 now = datetime.datetime.now()
 
 healthy, problems, caps = [], [], []
-recording = []
 for line in raw:
     parts = line.split("|", 4)
     name, reach = parts[0], parts[1]
-    js, bound, rec = (parts[2], parts[3], parts[4]) if len(parts) > 4 else ("", "", "")
+    js, bound = (parts[2], parts[3]) if len(parts) > 3 else ("", "")
     if reach == "down":
         problems.append(f"{name}: UNREACHABLE")
         continue
@@ -110,8 +138,6 @@ for line in raw:
         healthy.append(name)
     caps.append((name, disk if isinstance(disk, int) else 0,
                  temp if isinstance(temp, int) else 0))
-    if rec.strip():
-        recording.append(name)
 
 # ---- overnight alerts (last 24 h) ----
 alerts, unresolved = [], []
@@ -160,7 +186,8 @@ if unresolved:
     L.append("  :rotating_light: still open: " + "; ".join(unresolved))
 
 L.append("")
-L.append("*Recording:* " + (" ".join(recording) if recording else "none active"))
+# Measured on the lab server by recording_status.sh, not on the nodes.
+L.append(os.environ.get("REC_LINE", "*Recording:* not measured"))
 
 if caps:
     worst = sorted(caps, key=lambda c: -c[1])[:3]

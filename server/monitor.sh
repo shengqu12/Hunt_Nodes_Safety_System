@@ -7,6 +7,8 @@
 #   1. ping its Tailscale IP           -> node down alerts
 #   2. ssh: read status.json           -> stale heartbeat / lidar failed /
 #                                          disk warnings, as reported by node
+# and then, once per pass:
+#   3. is the day's recording running? -> recording-not-started alerts
 # Alerts are deduplicated with a cooldown and paired with recovery notices.
 
 set -u
@@ -19,6 +21,8 @@ mkdir -p "$STATE_DIR"
 
 # shellcheck disable=SC1090
 source "$CONFIG"
+# shellcheck disable=SC1090
+source "$SCRIPT_DIR/recording_status.sh"
 
 DOWN_THRESHOLD="${DOWN_THRESHOLD:-3}"          # consecutive failed pings
 HEARTBEAT_MAX_AGE="${HEARTBEAT_MAX_AGE:-300}"  # seconds before status.json is stale
@@ -113,3 +117,47 @@ while read -r name ip user; do
 
     log "$name ok: lidar=$lidar disk=${disk}%"
 done < "$NODES"
+
+# ---- 3. is the day's recording actually running? ---------------------------
+# Recording is the point of the fleet, and until now nothing watched it. The
+# failure this catches leaves no trace anywhere: lidar-record-start.timer can
+# sit `enabled` on disk and `inactive (dead)` in systemd, in which case it
+# fires nothing, logs nothing, and a whole recording day passes looking
+# exactly like a day with nothing scheduled.
+#
+# Everything below is measured ON THIS HOST. record_supervisor.py runs here,
+# not on a Jetson.
+if [[ "${RECORDING_ALERTS:-0}" == "1" ]]; then
+    rec_raw="$(recording_probe)"
+    rk() { sed -n "s/^$1=//p" <<< "$rec_raw" | head -1; }
+    rec_unit="${RECORD_START_TIMER:-lidar-record-start.timer}"
+    rec_session="$(rk SESSION)"
+    grace="${RECORDING_GRACE_SECS:-900}"
+
+    # IN_WINDOW is three-valued and the third value matters. `unknown` means
+    # the schedule could not be read — the timer's OnCalendar was unavailable,
+    # or the recording config was. Alerting on it would turn "I cannot tell"
+    # into "recording is broken", which is the one thing a monitor must never
+    # do; it would also fire every weekend. Silence here is correct: the
+    # morning brief still reports that it could not be determined.
+    if [[ "$(rk IN_WINDOW)" == "yes" && "$rec_session" == "none" ]] \
+       && (( $(rk SECS_INTO_WINDOW) >= grace )); then
+        body="No record_supervisor.py process is running on $(hostname -s), and the schedule says there should be one."
+        body+=$'\n\n'"Measured just now:"
+        body+=$'\n'"  window        $(rk WINDOW) on $(rk DAYS); today is $(rk TODAY), hour $(rk HOUR)"
+        body+=$'\n'"  $rec_unit  is $(rk START_TIMER) (unit file: $(rk START_TIMER_ENABLED))"
+        body+=$'\n'"  start refused: $(rk REFUSED)"
+        [[ "$(rk REFUSED)" == "yes" ]] && \
+            body+=$'\n'"    $(rk REFUSED_AT): $(rk REFUSED_TEXT)"
+        body+=$'\n'"  free space    $(rk FREE_GB) GB; a day needs $(rk START_THRESHOLD_GB) GB to start"
+        body+=$'\n'"  exclusions    $(rk EXCLUDED)"
+        alert_once "recording_down" \
+            "RECORDING NOT RUNNING — no session on $(hostname -s)" "$body"
+        log "recording: NOT RUNNING inside window (timer=$(rk START_TIMER) refused=$(rk REFUSED) free=$(rk FREE_GB)GB)"
+    elif [[ "$rec_session" != "none" ]]; then
+        recover_if_active "recording_down" \
+            "RECOVERED: recording is running again" \
+            "Session $rec_session is being recorded by record_supervisor.py on $(hostname -s)."
+        log "recording: $rec_session"
+    fi
+fi
