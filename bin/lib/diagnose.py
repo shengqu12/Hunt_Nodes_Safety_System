@@ -251,70 +251,163 @@ def _fleet(bundle: Bundle, conf: dict, nodes: list, state, detailed: bool) -> No
     disk_warn = common.conf_int(conf, "DISK_WARN_PCT", 85)
     temp_warn = common.conf_int(conf, "TEMP_WARN_C", 85)
 
+    if detailed:
+        for res in results:
+            _peer_fact(bundle, res, peers, detailed=True)
+            if not _reachable(bundle, res, flags):
+                continue
+            _node_facts(bundle, res, stale_max, disk_warn, temp_warn, True)
+        return
+
+    # Fleet view: group by SYMPTOM, not by node.
+    #
+    # One line per node per symptom produced six identical 180-character
+    # "UDP 56301 unbound" facts, which cost most of the evidence budget and
+    # read as six unrelated problems. "6 of 7 nodes" is both shorter and a
+    # strictly better diagnosis: a fault on every node is a fault upstream of
+    # every node, and that is the first thing a reader needs to know.
+    groups: dict[str, list] = {}
+    notes: list[str] = []
     healthy = []
+
     for res in results:
         name = res["name"]
+        _peer_fact(bundle, res, peers, detailed=False)
         peer = peers.get(res["ip"])
-
-        # Tailscale first: it distinguishes "the peer has not checked in" from
-        # "packets are not getting through", which a ping counter cannot.
-        if peer is not None:
-            if peer["online"]:
-                link = ("direct " + peer["direct_addr"] if peer["direct_addr"]
-                        else "relay " + (peer["relay"] or "?"))
-                if not detailed and res.get("ssh_ok"):
-                    pass                     # keep the healthy case quiet
-                else:
-                    bundle.add(f"{name} Tailscale", f"online ({link})", "ok",
-                               f"peer {peer['hostname']}, measured on puget now")
-            else:
-                last = peer["last_seen"]
-                ago = (common.human_duration(
-                    (common.now() - last).total_seconds()) if last else "unknown")
-                bundle.add(f"{name} Tailscale", f"OFFLINE, last seen {ago} ago",
-                           "bad",
-                           f"peer {peer['hostname']}; Tailscale's own view "
-                           f"measured on puget now — the node is off the "
-                           f"network, not merely slow to answer pings")
-        elif not detailed:
-            pass
-        else:
-            bundle.add(f"{name} Tailscale", "no peer with this IP", "unknown",
-                       f"{res['ip']} is not in `tailscale status` output")
-
-        ping_fails = flags.get(f"ping_{name}", {}).get("consecutive_ping_fails")
+        if peer is not None and not peer["online"]:
+            groups.setdefault("off the Tailscale network", []).append(name)
 
         if not res.get("ping_ok"):
-            detail = "measured now, 2 packets with a 3s timeout each"
-            if ping_fails:
-                detail += (f"; monitor.sh has counted {ping_fails} consecutive "
-                           f"failed passes")
-            bundle.add(f"{name} reachability", "NO PING REPLY", "bad", detail)
+            fails = flags.get(f"ping_{name}", {}).get("consecutive_ping_fails")
+            groups.setdefault("no ping reply", []).append(
+                f"{name}" + (f" ({fails} failed passes)" if fails else ""))
             continue
-
         if not res.get("ssh_ok"):
-            # Pings but will not talk: a genuinely different fault from down.
-            bundle.add(f"{name} reachability",
-                       "pings, but SSH returned nothing usable", "bad",
-                       f"measured now: {res.get('error', '?')}")
+            groups.setdefault("pings but SSH returns nothing usable",
+                              []).append(name)
             continue
 
-        # Only expand a node that has something wrong, unless the question
-        # named one. Seven healthy nodes at seven facts each buried the two
-        # broken ones and blew past what Slack will show in a message.
-        if detailed or _node_has_issue(res, stale_max, disk_warn, temp_warn):
-            _node_facts(bundle, res, stale_max, disk_warn, temp_warn, detailed)
+        status = res.get("status") or {}
+        if res.get("status_error"):
+            groups.setdefault(f"status.json unreadable ({res['status_error']})",
+                              []).append(name)
         else:
+            age = res.get("heartbeat_age_secs")
+            if age is not None and age > stale_max:
+                groups.setdefault("heartbeat stale", []).append(
+                    f"{name} ({common.human_duration(age)})")
+            lidar = status.get("lidar_status", "?")
+            if lidar != "ok":
+                groups.setdefault(f"lidar_status={lidar}", []).append(name)
+            disk = status.get("disk_used_pct")
+            if isinstance(disk, int) and disk >= disk_warn:
+                groups.setdefault("disk at or above the warn threshold",
+                                  []).append(f"{name} ({disk}%)")
+            temp = status.get("cpu_temp_c")
+            if isinstance(temp, int) and temp >= temp_warn:
+                groups.setdefault("CPU temp at or above the warn threshold",
+                                  []).append(f"{name} ({temp}C)")
+            if status.get("note"):
+                notes.append(f"{name}: {str(status['note'])[:110]}")
+
+        if res.get("udp56301") != "bound":
+            groups.setdefault("UDP 56301 unbound", []).append(name)
+        if res.get("watchdog_timer") != "active":
+            groups.setdefault("guardian-watchdog.timer not active", []).append(
+                f"{name} ({res.get('watchdog_timer', '?')})")
+        skew = res.get("clock_skew_secs")
+        if skew is not None and abs(skew) >= 5:
+            groups.setdefault("clock skew vs the lab server", []).append(
+                f"{name} ({skew:+d}s)")
+
+        if not _node_has_issue(res, stale_max, disk_warn, temp_warn):
             healthy.append(name)
 
-    if healthy and not detailed:
-        bundle.add("Nodes with nothing wrong", ", ".join(healthy), "ok",
-                   f"{len(healthy)} of {len(results)} probed, measured now over "
-                   f"ping + one SSH each: heartbeat fresh, lidar_status ok, "
-                   f"watchdog timer active, UDP 56301 bound, disk and temp "
-                   f"under their thresholds. Ask about one by name for its "
-                   f"full readings")
+    total = len(results)
+    for symptom, names in groups.items():
+        bundle.add(
+            f"Nodes with {symptom}",
+            ", ".join(names) + f"  [{len(names)} of {total}]", "bad",
+            _SYMPTOM_DETAIL.get(symptom, "")
+            or ("measured now, one ping and one SSH per node. A symptom on "
+                "most of the fleet at once points upstream of any one node"))
 
+    if notes:
+        bundle.add("Notes the nodes' own watchdogs wrote", " | ".join(notes),
+                   "info", "free text from each status.json, as old as that "
+                           "node's heartbeat")
+
+    if healthy:
+        bundle.add("Nodes with nothing wrong", ", ".join(healthy), "ok",
+                   f"{len(healthy)} of {total} probed: heartbeat fresh, "
+                   f"lidar_status ok, watchdog timer active, UDP 56301 bound, "
+                   f"disk and temp under their thresholds. Ask about one by "
+                   f"name for its full readings")
+
+
+# Detail text for the symptoms where the obvious reading is the wrong one.
+_SYMPTOM_DETAIL = {
+    "UDP 56301 unbound":
+        "measured with `ss -uln` on each Jetson: nothing holds the Livox "
+        "driver's port. Bound would not prove the driver is publishing, only "
+        "that the socket is open",
+    "heartbeat stale":
+        "age measured against each node's own clock; the guardian calls it "
+        "stale above its HEARTBEAT_MAX_AGE",
+    "off the Tailscale network":
+        "Tailscale's own view, measured on puget now — these are off the "
+        "network, not merely slow to answer pings",
+    "guardian-watchdog.timer not active":
+        "on the Jetson. A dead timer means nothing is writing status.json, "
+        "which is different from the node being wedged: every status.json "
+        "figure for these nodes is frozen at its last write",
+    "pings but SSH returns nothing usable":
+        "measured now. Different from down: the node is up and on the "
+        "network but will not answer",
+}
+
+
+def _peer_fact(bundle: Bundle, res: dict, peers: dict, detailed: bool) -> None:
+    """Tailscale's view of one node, reported only when it says something."""
+    peer = peers.get(res["ip"])
+    name = res["name"]
+    if peer is None:
+        if detailed:
+            bundle.add(f"{name} Tailscale", "no peer with this IP", "unknown",
+                       f"{res['ip']} is not in `tailscale status` output")
+        return
+    if not peer["online"]:
+        last = peer["last_seen"]
+        ago = (common.human_duration((common.now() - last).total_seconds())
+               if last else "unknown")
+        bundle.add(f"{name} Tailscale", f"OFFLINE, last seen {ago} ago", "bad",
+                   f"peer {peer['hostname']}; Tailscale's own view measured on "
+                   f"puget now — the node is off the network, not merely slow "
+                   f"to answer pings")
+    elif detailed:
+        link = ("direct " + peer["direct_addr"] if peer["direct_addr"]
+                else "relay " + (peer["relay"] or "?"))
+        bundle.add(f"{name} Tailscale", f"online ({link})", "ok",
+                   f"peer {peer['hostname']}, measured on puget now")
+
+
+def _reachable(bundle: Bundle, res: dict, flags: dict) -> bool:
+    """Report reachability for the detailed path. True if we got telemetry."""
+    name = res["name"]
+    if not res.get("ping_ok"):
+        detail = "measured now, 2 packets with a 3s timeout each"
+        fails = flags.get(f"ping_{name}", {}).get("consecutive_ping_fails")
+        if fails:
+            detail += (f"; monitor.sh has counted {fails} consecutive failed "
+                       f"passes")
+        bundle.add(f"{name} reachability", "NO PING REPLY", "bad", detail)
+        return False
+    if not res.get("ssh_ok"):
+        bundle.add(f"{name} reachability",
+                   "pings, but SSH returned nothing usable", "bad",
+                   f"measured now: {res.get('error', '?')}")
+        return False
+    return True
 
 def _node_has_issue(res: dict, stale_max: int, disk_warn: int,
                     temp_warn: int) -> bool:

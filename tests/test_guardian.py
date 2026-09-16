@@ -533,6 +533,76 @@ class TestEvidenceBudget(unittest.TestCase):
         self.assertLessEqual(len(text.split("... TRUNCATED")[0]), 200)
 
 
+class TestFleetGrouping(unittest.TestCase):
+    """A fault on every node is one fact, not seven."""
+
+    def setUp(self):
+        self._nodes, self._ts = probe.probe_nodes, probe.tailscale_peers
+        probe.tailscale_peers = lambda: {"peers": {}}
+
+    def tearDown(self):
+        probe.probe_nodes, probe.tailscale_peers = self._nodes, self._ts
+
+    def _node(self, name, **over):
+        base = {"name": name, "ip": f"10.0.0.{name[-1]}", "user": "kelrod",
+                "ping_ok": True, "ssh_ok": True, "udp56301": "bound",
+                "watchdog_timer": "active", "clock_skew_secs": 0,
+                "heartbeat_age_secs": 10,
+                "status": {"lidar_status": "ok", "disk_used_pct": 47,
+                           "cpu_temp_c": 50, "note": ""}}
+        base.update(over)
+        return base
+
+    def _collect(self, results):
+        probe.probe_nodes = lambda nodes, conf, timeout=20.0: results
+        bundle = diagnose.Bundle(topic="status")
+        nodes = [{"name": r["name"], "ip": r["ip"], "user": "kelrod"}
+                 for r in results]
+        diagnose._fleet(bundle, {}, nodes, "/nonexistent", detailed=False)
+        return bundle
+
+    def test_one_symptom_on_six_nodes_is_one_fact(self):
+        # Six identical 180-character "UDP 56301 unbound" lines cost most of
+        # the evidence budget and read as six unrelated problems.
+        results = [self._node(f"node{i}", udp56301="unbound")
+                   for i in range(1, 7)] + [self._node("node7")]
+        bundle = self._collect(results)
+        unbound = [f for f in bundle.facts if "UDP 56301 unbound" in f.label]
+        self.assertEqual(len(unbound), 1)
+        self.assertIn("[6 of 7]", unbound[0].value)
+        self.assertIn("node1", unbound[0].value)
+
+    def test_healthy_nodes_are_summarised_not_expanded(self):
+        bundle = self._collect([self._node(f"node{i}") for i in range(1, 8)])
+        labels = [f.label for f in bundle.facts]
+        self.assertIn("Nodes with nothing wrong", labels)
+        # No per-node expansion at all when nothing is wrong.
+        self.assertFalse([l for l in labels if "heartbeat" in l])
+
+    def test_distinct_symptoms_stay_distinct(self):
+        results = [
+            self._node("node1", udp56301="unbound"),
+            self._node("node2", status={"lidar_status": "failed",
+                                        "disk_used_pct": 47, "cpu_temp_c": 50,
+                                        "note": ""}),
+            self._node("node3", ping_ok=False, ssh_ok=False),
+        ]
+        bundle = self._collect(results)
+        labels = " | ".join(f.label for f in bundle.facts)
+        self.assertIn("UDP 56301 unbound", labels)
+        self.assertIn("lidar_status=failed", labels)
+        self.assertIn("no ping reply", labels)
+
+    def test_a_down_node_reports_nothing_further_about_itself(self):
+        # Ping failed, so every other reading is unknown, not ok.
+        bundle = self._collect([self._node("node1", ping_ok=False,
+                                           ssh_ok=False)])
+        labels = " | ".join(f.label for f in bundle.facts)
+        self.assertIn("no ping reply", labels)
+        self.assertNotIn("UDP 56301", labels)
+        self.assertNotIn("nothing wrong", labels)
+
+
 class TestBundle(unittest.TestCase):
     def test_worst_ranks_bad_over_warn_over_unknown(self):
         bundle = diagnose.Bundle(topic="t")
