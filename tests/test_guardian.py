@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 import askbot                                # noqa: E402
-from lib import common, diagnose, probe      # noqa: E402
+from lib import actions, common, diagnose, probe   # noqa: E402
 
 
 class TestConfigParsing(unittest.TestCase):
@@ -624,6 +624,139 @@ class TestNoteFolding(unittest.TestCase):
         self.assertIn("recovered after 2 power cycles", folded)
         self.assertIn("no ping reply", folded)
         self.assertIn("|", folded)
+
+
+class TestPowerParsing(unittest.TestCase):
+    """The only code path that decides whether hardware gets touched."""
+
+    NODES = [{"name": f"node{i}", "ip": f"10.0.0.{i}", "user": "kelrod"}
+             for i in range(1, 8)]
+
+    def _parse(self, text):
+        return actions.parse(text, self.NODES)
+
+    def test_chinese_and_english_power_on(self):
+        for text in ("启动 lidar 4、5", "power on lidar 4 and 5",
+                     "lidar 4,5 上电", "turn on lidars 4 5"):
+            req = self._parse(text)
+            self.assertIsNotNone(req, text)
+            self.assertEqual(req.verb, "on", text)
+            self.assertEqual([n["name"] for n in req.nodes],
+                             ["node4", "node5"], text)
+
+    def test_off_and_cycle(self):
+        self.assertEqual(self._parse("关掉 lidar 2 的电源").verb, "off")
+        self.assertEqual(self._parse("重启 lidar 4 的雷达").verb, "cycle")
+        self.assertEqual(self._parse("power cycle lidar 7").verb, "cycle")
+
+    def test_all(self):
+        req = self._parse("power on all lidars")
+        self.assertEqual(len(req.nodes), 7)
+
+    def test_a_question_is_never_an_action(self):
+        # These fall through to the question path. Parsing one as a power
+        # action would switch hardware because somebody asked about it.
+        for text in ("why is node5 down?", "how are the lidars now?",
+                     "status", "node4 的 lidar 怎么了", "lidar 4 为什么 failed"):
+            self.assertIsNone(self._parse(text), text)
+
+    def test_a_number_must_be_attached_to_a_node_or_lidar(self):
+        # "restart in 5 minutes" must not become "restart node5".
+        self.assertIsNone(self._parse("restart the lidar pipeline in 5 minutes"))
+        self.assertIsNone(self._parse("power cycle it in 4 hours"))
+
+    def test_other_subsystems_are_not_hardware(self):
+        # Recording, units and the bot are all things people say "restart" about.
+        for text in ("restart the recording", "restart the lidar recording",
+                     "start the session for lidar 4", "restart the bot",
+                     "restart lidar-record-start.timer"):
+            self.assertIsNone(self._parse(text), text)
+
+    def test_unconfigured_nodes_are_dropped(self):
+        # node9 does not exist. Acting on "whatever was meant" is not an option.
+        self.assertIsNone(self._parse("power on lidar 9"))
+        req = self._parse("power on lidar 4 and 9")
+        self.assertEqual([n["name"] for n in req.nodes], ["node4"])
+
+    def test_no_verb_no_action(self):
+        self.assertIsNone(self._parse("lidar 4"))
+        self.assertIsNone(self._parse(""))
+
+
+class TestPowerExecution(unittest.TestCase):
+    def setUp(self):
+        self._probe = probe.node_probe
+        self._run = actions.common.run
+
+    def tearDown(self):
+        probe.node_probe = self._probe
+        actions.common.run = self._run
+
+    def _node(self, **over):
+        base = {"name": "node4", "ip": "10.0.0.4", "user": "kelrod",
+                "ssh_ok": True, "ping_ok": True, "relay_tty": "/dev/ttyUSB0",
+                "uptime_secs": 50000, "load1": "0.3", "boot_id": "aaa",
+                "lidar_carrier": "0"}
+        base.update(over)
+        return base
+
+    def test_refuses_a_node_with_no_relay(self):
+        probe.node_probe = lambda n, c, timeout=20.0: self._node(relay_tty="")
+        req = actions.PowerRequest("on", [{"name": "node4", "ip": "10.0.0.4",
+                                          "user": "kelrod"}])
+        out = actions.execute(req, {}, Path(tempfile.mkdtemp()))
+        self.assertEqual(out[0]["outcome"], "refused")
+        self.assertIn("no relay serial device", out[0]["why"])
+
+    def test_refuses_a_node_that_has_just_booted(self):
+        probe.node_probe = lambda n, c, timeout=20.0: self._node(uptime_secs=10)
+        req = actions.PowerRequest("on", [{"name": "node4", "ip": "10.0.0.4",
+                                          "user": "kelrod"}])
+        out = actions.execute(req, {}, Path(tempfile.mkdtemp()))
+        self.assertEqual(out[0]["outcome"], "refused")
+        self.assertIn("up 10s", out[0]["why"])
+
+    def test_a_node_reset_is_its_own_outcome_not_a_failure(self):
+        # Observed twice on node5: the LiDAR's 18 W inrush resets the Jetson.
+        # Reporting that as "failed" would send someone to look at the relay.
+        calls = {"n": 0}
+
+        def fake_probe(node, conf, timeout=20.0):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return self._node()                       # before
+            return self._node(boot_id="bbb", uptime_secs=20)   # rebooted
+        probe.node_probe = fake_probe
+        actions.common.run = lambda argv, timeout=15.0, stdin_text=None: (0, "", "")
+        req = actions.PowerRequest("on", [{"name": "node5", "ip": "10.0.0.5",
+                                          "user": "kelrod"}])
+        out = actions.execute(req, {"POWER_SETTLE_SECS": "4"}, Path(tempfile.mkdtemp()))
+        self.assertEqual(out[0]["outcome"], "node_reset")
+        self.assertIn("18 W", out[0]["why"])
+
+    def test_success_is_measured_carrier_not_a_successful_write(self):
+        calls = {"n": 0}
+
+        def fake_probe(node, conf, timeout=20.0):
+            calls["n"] += 1
+            return self._node(lidar_carrier="0" if calls["n"] == 1 else "1",
+                              lidar_link_ip="192.168.1.5/24")
+        probe.node_probe = fake_probe
+        actions.common.run = lambda argv, timeout=15.0, stdin_text=None: (0, "", "")
+        req = actions.PowerRequest("on", [{"name": "node4", "ip": "10.0.0.4",
+                                          "user": "kelrod"}])
+        out = actions.execute(req, {"POWER_SETTLE_SECS": "8"}, Path(tempfile.mkdtemp()))
+        self.assertEqual(out[0]["outcome"], "ok")
+        self.assertEqual(out[0]["carrier_after"], "1")
+
+    def test_a_written_command_with_no_effect_is_not_success(self):
+        # The relay has no readback. "The bytes went out" is not the claim.
+        probe.node_probe = lambda n, c, timeout=20.0: self._node()
+        actions.common.run = lambda argv, timeout=15.0, stdin_text=None: (0, "", "")
+        req = actions.PowerRequest("on", [{"name": "node4", "ip": "10.0.0.4",
+                                          "user": "kelrod"}])
+        out = actions.execute(req, {"POWER_SETTLE_SECS": "4"}, Path(tempfile.mkdtemp()))
+        self.assertEqual(out[0]["outcome"], "no_change")
 
 
 class TestBundle(unittest.TestCase):

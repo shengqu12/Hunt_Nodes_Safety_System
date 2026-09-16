@@ -178,6 +178,19 @@ def run(argv: list[str], timeout: float = 15.0,
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def write_json(path: Path, data) -> None:
+    """Write via a temp file in the same directory, then rename.
+
+    rename(2) is atomic within a filesystem, so a run killed mid-write leaves
+    the previous good file rather than half a JSON document.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
+    tmp.replace(path)
+
+
 def read_json(path: Path, default=None):
     try:
         return json.loads(Path(path).read_text())

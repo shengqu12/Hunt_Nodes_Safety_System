@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from lib import common, diagnose, llm      # noqa: E402
+from lib import actions, common, diagnose, llm      # noqa: E402
 
 log = logging.getLogger("askbot")
 
@@ -96,10 +96,14 @@ likeliest cause
 • `status` / `现在怎么样` — probe the fleet now and report
 • `recording` / `在录吗` — whether today's capture started, and if not, why
 • `alerts` / `告警` — what fired in the last 24 h and what is still open
+• `power on lidar 4,5` / `启动 lidar 4、5` — switch LiDARs on
+• `power off lidar 4` / `重启 lidar 4` — switch off or cycle, after you \
+reply `confirm`
 • `help`
 
-I only read. I cannot restart anything, change a threshold, or touch a node — \
-every answer comes with the raw evidence so you can check it."""
+The only thing I can change is a LiDAR's power switch, on nodes you name. \
+Everything else I only read, and every answer comes with the raw evidence so \
+you can check it."""
 
 
 # -- intent ----------------------------------------------------------------
@@ -166,15 +170,102 @@ def answer(conf: dict, question: str, topic: str, node: str | None,
 
 
 def handle(conf: dict, text: str, in_alert_thread: bool,
-           backend: llm.Backend) -> str:
+           backend: llm.Backend, thread_key: str = "cli") -> str:
     nodes = common.load_nodes(conf)
+    state = common.state_dir(conf)
+    lowered = (text or "").lower().strip()
+
+    if re.search(r"\b(help|usage|commands)\b|帮助|怎么用|用法", lowered):
+        return HELP
+
+    pending_path = state / "pending_actions.json"
+    if re.fullmatch(r"(confirm|yes|y|确认|好|同意)[!.。]?", lowered):
+        return _apply_pending(conf, state, pending_path, thread_key)
+    if re.fullmatch(r"(cancel|no|n|取消|算了)[!.。]?", lowered):
+        pending = common.read_json(pending_path, {}) or {}
+        if pending.pop(thread_key, None) is None:
+            return "Nothing pending in this thread."
+        common.write_json(pending_path, pending)
+        return "Dropped."
+
+    # A power request is parsed by rules, never by the model. If it does not
+    # parse unambiguously we fall through to answering a question, which is
+    # the safe direction: the worst case is an explanation nobody wanted.
+    request = actions.parse(text, nodes)
+    if request is not None:
+        log.info("action verb=%s nodes=%s text=%r", request.verb,
+                 [n["name"] for n in request.nodes], (text or "")[:120])
+        return _handle_action(conf, state, pending_path, thread_key, request)
+
     intent, topic, node = route(text, in_alert_thread, nodes)
     log.info("intent=%s topic=%s node=%s text=%r", intent, topic, node,
              (text or "")[:120])
-    if intent == "help":
-        return HELP
     reply, _ = answer(conf, text or "why", topic, node, backend)
     return reply
+
+
+def _recording_block(request) -> str | None:
+    """Refuse to interrupt a capture that is running.
+
+    Powering a LiDAR down mid-session costs the day's data, and the person
+    typing into Slack cannot see whether a session is running. Switching ON is
+    never blocked — it can only add a sensor, never remove one.
+    """
+    if request.verb == "on":
+        return None
+    session = probe_recording_session()
+    if session:
+        return (f":no_entry: A recording session is running on the lab server "
+                f"(`{session}`). I will not power a LiDAR {request.verb} while "
+                f"it is capturing — stop the session first, or do it by hand "
+                f"if you mean to lose the data.")
+    return None
+
+
+def probe_recording_session() -> str | None:
+    from lib import probe
+    found = probe.recording_session().get("sessions") or []
+    return found[0].get("session") if found else None
+
+
+def _handle_action(conf: dict, state, pending_path, thread_key: str,
+                   request) -> str:
+    blocked = _recording_block(request)
+    if blocked:
+        return blocked
+
+    # Switching ON is the safe direction and is what people actually type in a
+    # hurry, so it runs. OFF and CYCLE remove a working sensor, so they wait
+    # for a word back.
+    if request.verb == "on":
+        results = actions.execute(request, conf, state)
+        return actions.render(request, results)
+
+    pending = common.read_json(pending_path, {}) or {}
+    pending[thread_key] = {"verb": request.verb, "text": request.text,
+                           "nodes": [n["name"] for n in request.nodes]}
+    common.write_json(pending_path, pending)
+    return (f"I can do this: *{request.describe()}*.\n"
+            f"Reply `confirm` to go ahead, or `cancel` to drop it.")
+
+
+def _apply_pending(conf: dict, state, pending_path, thread_key: str) -> str:
+    pending = common.read_json(pending_path, {}) or {}
+    saved = pending.pop(thread_key, None)
+    if not saved:
+        return ("Nothing pending in this thread. Ask for something first, "
+                "e.g. `power off lidar 4`.")
+    nodes = [n for n in common.load_nodes(conf) if n["name"] in saved["nodes"]]
+    if not nodes:
+        return ":no_entry: those nodes are no longer in nodes.list."
+    request = actions.PowerRequest(verb=saved["verb"], nodes=nodes,
+                                   text=saved.get("text", ""))
+    blocked = _recording_block(request)
+    if blocked:
+        return blocked
+    common.write_json(pending_path, pending)
+    results = actions.execute(request, conf, state)
+    return actions.render(request, results)
 
 
 # -- setup checking --------------------------------------------------------
@@ -420,7 +511,8 @@ def run_slack(conf: dict, backend: llm.Backend) -> int:
 
         reply_ts = thread_ts or event.get("ts")
         try:
-            reply = handle(conf, text, in_alert, backend)
+            reply = handle(conf, text, in_alert, backend,
+                           thread_key=f"{channel}:{reply_ts}")
         except Exception:
             log.error("handler failed:\n%s", traceback.format_exc())
             reply = (":boom: I broke while answering. The guardian itself is "

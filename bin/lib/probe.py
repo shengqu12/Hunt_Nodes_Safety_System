@@ -375,6 +375,25 @@ if ss -uln 2>/dev/null | grep -q ':56301 '; then
 else
   printf 'UDP56301=%s\n' 'unbound'
 fi
+# The LiDAR hangs off a USB-Ethernet adapter, and `carrier` is the physical
+# layer: 1 means something is powered at the far end of that cable. It is
+# local to the node, needs no network round trip, and separates "the LiDAR has
+# no power" from "the LiDAR is powered but not answering at IP level" — which
+# a ping cannot do. On the night the relays were fitted, six nodes reported
+# lidar_status=failed and carrier=0 was the fact that said why: the LiDARs
+# were simply switched off.
+LIF=$(ls -d /sys/class/net/enx* 2>/dev/null | head -1)
+if [ -n "$LIF" ]; then
+  printf 'LIDAR_IF=%s\n'      "$(basename "$LIF")"
+  printf 'LIDAR_CARRIER=%s\n' "$(cat "$LIF/carrier" 2>/dev/null)"
+  printf 'LIDAR_OPER=%s\n'    "$(cat "$LIF/operstate" 2>/dev/null)"
+  printf 'LIDAR_LINK_IP=%s\n' "$(ip -o -4 addr show dev "$(basename "$LIF")" 2>/dev/null | awk '{print $4}' | head -1)"
+else
+  printf 'LIDAR_IF=%s\n' 'none'
+fi
+printf 'BOOT_ID=%s\n' "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+printf 'LOAD1=%s\n'   "$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)"
+printf 'RELAY_TTY=%s\n' "$(for d in /dev/serial/by-path/platform-3610000.usb-usb-0:2.3:1.0-port0 /dev/ttyUSB0; do [ -c "$d" ] && { echo "$d"; break; }; done)"
 printf 'WATCHDOG_ACTIVE=%s\n' "$(systemctl is-active guardian-watchdog.timer 2>/dev/null)"
 # Converted to epoch seconds HERE, by the same date(1) that formatted it, and
 # against the node's own clock. systemctl prints "Tue 2026-09-15 20:44:56 EDT"
@@ -432,6 +451,13 @@ def node_probe(node: dict, conf: dict, timeout: float = 20.0) -> dict:
             fields[key.strip()] = value.strip()
 
     result["udp56301"] = fields.get("UDP56301", "?")
+    result["lidar_if"] = fields.get("LIDAR_IF", "")
+    result["lidar_carrier"] = fields.get("LIDAR_CARRIER", "")
+    result["lidar_oper"] = fields.get("LIDAR_OPER", "")
+    result["lidar_link_ip"] = fields.get("LIDAR_LINK_IP", "")
+    result["boot_id"] = fields.get("BOOT_ID", "")
+    result["load1"] = fields.get("LOAD1", "")
+    result["relay_tty"] = fields.get("RELAY_TTY", "")
     result["watchdog_timer"] = fields.get("WATCHDOG_ACTIVE", "?")
     watchdog_epoch = _as_int(fields.get("WATCHDOG_LAST_EPOCH"))
     result["boot_unit"] = fields.get("BOOTUNIT", "?")

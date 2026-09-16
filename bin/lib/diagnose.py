@@ -311,6 +311,16 @@ def _fleet(bundle: Bundle, conf: dict, nodes: list, state, detailed: bool) -> No
             if status.get("note"):
                 notes.append((name, str(status["note"])[:160]))
 
+        # Physical layer first: no carrier means the LiDAR is not powered, and
+        # every IP-level symptom below it is a consequence, not a finding.
+        if res.get("lidar_if") in ("none", ""):
+            groups.setdefault("no LiDAR network interface at all", []).append(name)
+        elif res.get("lidar_carrier") == "0":
+            groups.setdefault("LiDAR link has no carrier", []).append(name)
+
+        if res.get("relay_tty") == "":
+            groups.setdefault("no relay serial device", []).append(name)
+
         if res.get("udp56301") != "bound":
             groups.setdefault("UDP 56301 unbound", []).append(name)
         if res.get("watchdog_timer") != "active":
@@ -406,6 +416,19 @@ _SYMPTOM_DETAIL = {
     "pings but SSH returns nothing usable":
         "measured now. Different from down: the node is up and on the "
         "network but will not answer",
+    "LiDAR link has no carrier":
+        "`carrier` on the node's USB-Ethernet adapter, the PHYSICAL layer: "
+        "nothing is powered at the far end of that cable. This is upstream of "
+        "lidar_status and of UDP 56301, so those are consequences here, not "
+        "separate findings. Powering the LiDAR takes carrier 0 -> 1 in about "
+        "8 seconds",
+    "no LiDAR network interface at all":
+        "no enx* adapter is present on the node, which is different from the "
+        "adapter being there with a dead link: the hardware itself is gone",
+    "no relay serial device":
+        "neither the by-path node nor /dev/ttyUSB0 exists, so this node's "
+        "LiDAR cannot be switched on or off. Usually ch341 is not installed, "
+        "or brltty has claimed the adapter",
 }
 
 
@@ -537,6 +560,27 @@ def _node_facts(bundle: Bundle, res: dict, stale_max: int, disk_warn: int,
                       f"measured on the node against its own clock")
     bundle.add(f"{name} guardian-watchdog.timer", wd,
                "ok" if wd == "active" else "bad", wd_detail)
+
+    if res.get("lidar_if") in ("none", ""):
+        bundle.add(f"{name} LiDAR link", "no enx* adapter present", "bad",
+                   "the USB-Ethernet adapter the LiDAR hangs off is not on "
+                   "this node at all")
+    else:
+        carrier = res.get("lidar_carrier", "?")
+        bundle.add(f"{name} LiDAR link carrier",
+                   f"{carrier} ({res.get('lidar_oper', '?')}) on "
+                   f"{res['lidar_if']}",
+                   "ok" if carrier == "1" else "bad",
+                   f"physical layer, measured now. 1 means something is "
+                   f"powered at the far end of the cable; 0 means the LiDAR "
+                   f"has no power. link ip "
+                   f"{res.get('lidar_link_ip') or '(none assigned)'}")
+
+    relay = res.get("relay_tty", "")
+    bundle.add(f"{name} relay serial device", relay or "ABSENT",
+               "ok" if relay else "bad",
+               "what the power switch is driven through. Absent means this "
+               "node's LiDAR cannot be switched at all")
 
     port = res.get("udp56301", "?")
     bundle.add(f"{name} UDP 56301", port,
