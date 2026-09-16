@@ -51,6 +51,21 @@ print(",".join(d for d in order if d in days) if days else "unknown")
 PY
 }
 
+# _sd VERB UNIT [ARGS] — ask systemd one question, falling back to `unknown`
+# only when it answered with nothing at all.
+#
+# `systemctl is-active` exits non-zero for every state that is not active, and
+# `is-enabled` does the same for `linked`. Both are ordinary answers, not
+# errors, so `systemctl ... || echo unknown` appends "unknown" to a perfectly
+# good reading and the caller sees two values. Branch on the output, not the
+# exit code.
+_sd() {
+    local verb="$1" unit="$2"; shift 2
+    local out
+    out=$(systemctl --user "$verb" "$unit" "$@" 2>/dev/null)
+    echo "${out:-unknown}"
+}
+
 # Is a recording supervisor running on THIS host?
 #
 # pgrep -f matches full command lines, so it also matches any shell wrapper
@@ -106,9 +121,9 @@ recording_probe() {
     # gap between them is how a whole recording day went missing: the timer was
     # enabled, its symlink was in place, and it was inactive (dead), so nothing
     # fired it and no error appeared anywhere.
-    echo "START_TIMER=$(systemctl --user is-active "$unit" 2>/dev/null || echo unknown)"
-    echo "START_TIMER_ENABLED=$(systemctl --user is-enabled "$unit" 2>/dev/null || echo unknown)"
-    echo "START_TIMER_NEXT=$(systemctl --user show -p NextElapseUSecRealtime --value "$unit" 2>/dev/null || echo unknown)"
+    echo "START_TIMER=$(_sd is-active "$unit")"
+    echo "START_TIMER_ENABLED=$(_sd is-enabled "$unit")"
+    echo "START_TIMER_NEXT=$(_sd show "$unit" -p NextElapseUSecRealtime --value)"
 
     session=$(_rec_session)
     echo "SESSION=${session:-none}"
