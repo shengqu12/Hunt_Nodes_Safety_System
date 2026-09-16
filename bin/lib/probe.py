@@ -407,15 +407,17 @@ def node_probe(node: dict, conf: dict, timeout: float = 20.0) -> dict:
         return result
 
     state_dir = conf.get("NODE_STATE_DIR") or "/var/lib/lidar-guardian"
-    # stdin is closed rather than inherited. The bash guardian needs `ssh -n`
-    # because it runs inside a `while read` loop over nodes.list; here the
-    # reason is narrower but the failure is the same one.
+    # `sh -s` reads the script from stdin, so the script must actually be fed
+    # in. Left closed, ssh exits 0 having run nothing, and every node in the
+    # fleet reports as "pings but SSH returned nothing usable" — a fleet-wide
+    # outage that is entirely in the probe. The END=1 sentinel below is what
+    # turned that into a visible failure instead of seven nodes of blank facts.
     code, out, err = common.run(
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
          "-o", "StrictHostKeyChecking=accept-new",
          f"{node['user']}@{node['ip']}",
          f"NODE_STATE_DIR={state_dir} sh -s"],
-        timeout=timeout)
+        timeout=timeout, stdin_text=NODE_SCRIPT)
     if code != 0 or "END=1" not in out:
         result["ssh_ok"] = False
         result["error"] = ((err or out).strip()[:200]

@@ -376,15 +376,29 @@ class TestNodeProbe(unittest.TestCase):
         probe.common.run = self._real
 
     def _probe(self, ping_rc=0, ssh_out=None, ssh_rc=0):
-        def fake(argv, timeout=15.0):
+        self.sent = {}
+
+        def fake(argv, timeout=15.0, stdin_text=None):
             if argv[0] == "ping":
                 return ping_rc, "", ""
             if argv[0] == "ssh":
+                self.sent["stdin"] = stdin_text
+                self.sent["argv"] = argv
                 return ssh_rc, (self.REMOTE if ssh_out is None else ssh_out), ""
             return 1, "", ""
         probe.common.run = fake
         return probe.node_probe({"name": "node2", "ip": "10.0.0.2",
                                  "user": "kelrod"}, {})
+
+    def test_the_script_is_actually_fed_to_the_remote_shell(self):
+        # `sh -s` reads its script from stdin. With stdin closed, ssh exits 0
+        # having run nothing, and all seven nodes report "pings but SSH
+        # returned nothing usable" — a fleet-wide outage that exists only in
+        # the probe. The first version of this shipped exactly that.
+        self._probe()
+        self.assertIn("sh -s", self.sent["argv"][-1])
+        self.assertIsNotNone(self.sent["stdin"])
+        self.assertIn("END=1", self.sent["stdin"])
 
     def test_heartbeat_age_is_measured_against_the_nodes_own_clock(self):
         # status.json's timestamp was written by the node. Comparing it to the

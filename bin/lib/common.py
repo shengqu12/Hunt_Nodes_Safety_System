@@ -154,11 +154,23 @@ def node_named(text: str, nodes: list[dict]) -> str | None:
 
 # -- running commands -----------------------------------------------------
 
-def run(argv: list[str], timeout: float = 15.0) -> tuple[int, str, str]:
-    """Run a local read-only command with a hard ceiling. Never raises."""
+def run(argv: list[str], timeout: float = 15.0,
+        stdin_text: str | None = None) -> tuple[int, str, str]:
+    """Run a local read-only command with a hard ceiling. Never raises.
+
+    stdin is closed unless `stdin_text` is given. Closing it matters: the bash
+    guardian needs `ssh -n` because it runs inside a `while read` loop over
+    nodes.list, and an ssh that inherits that stdin eats the rest of the node
+    list. Feeding a script to `ssh ... sh -s` is the one case that genuinely
+    wants stdin, and it must ask for it explicitly.
+    """
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True,
-                              timeout=timeout, stdin=subprocess.DEVNULL)
+        if stdin_text is None:
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=timeout, stdin=subprocess.DEVNULL)
+        else:
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=timeout, input=stdin_text)
     except subprocess.TimeoutExpired:
         return 124, "", f"timed out after {timeout}s"
     except (OSError, ValueError) as exc:
