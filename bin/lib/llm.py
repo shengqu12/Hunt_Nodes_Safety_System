@@ -75,6 +75,12 @@ class OllamaBackend(Backend):
         # Hold the model in VRAM between questions. A 17 GB model takes ~10s
         # to load, and ollama answers 500 to anything that arrives while it is
         # loading — which is exactly what a duplicate Slack delivery did.
+        #
+        # But this is a shared machine and gemma3:27b parks ~20 GB on a card.
+        # GPU 1 is also where live-twin-tracker.service runs (GPU 0 belongs to
+        # the 22:15 daily pipeline). The tracker only needs ~600 MiB so the two
+        # do fit, but the margin is not something to spend by accident —
+        # hence configurable, and not "forever".
         self.keep_alive = keep_alive
 
     def complete(self, question: str, evidence: str) -> str:
@@ -174,5 +180,6 @@ def from_config(conf: dict) -> Backend:
     if backend == "ollama":
         return OllamaBackend(
             model=conf.get("LLM_MODEL") or "gemma3:27b",
-            url=conf.get("OLLAMA_URL") or "http://localhost:11434")
+            url=conf.get("OLLAMA_URL") or "http://localhost:11434",
+            keep_alive=conf.get("OLLAMA_KEEP_ALIVE") or "5m")
     raise LLMError(f"unknown LLM_BACKEND {backend!r}; use 'ollama' or 'claude'")
