@@ -1,6 +1,11 @@
 config/guardian.env
 config/server.env
 config/nodes.list
+# Timestamped backups of the real configs. These hold the Slack webhook
+# and, once the bot is set up, two Slack tokens — they must never be
+# committable by accident.
+config/*.bak
+config/*.bak.*
 *.log
 .venv/
 __pycache__/
