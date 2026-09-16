@@ -125,6 +125,20 @@ node's stashed module has the same vermagic, so installing it on a new node is
 a copy from another node plus `depmod -a` — no git clone, no internet on the
 Jetson. The vermagic gate against the local `ftdi_sio.ko` still runs per unit.
 
+### A LiDAR answers ping long after its link comes up
+
+On node6, reconnected from repair, the link carrier went 0 → 1 six seconds
+after the relay closed — and the sensor did not answer ping at
+`192.168.1.138` for a further **eight minutes**, while the node's watchdog
+logged six consecutive failures. It then recovered on its own.
+
+So `carrier=1` means the LiDAR has power, not that it is ready. The reference
+notes' "allow ~10 s before expecting a point cloud" describes a warm device;
+one that has been fully disconnected takes far longer to come up on IP. An
+action that reports success on carrier is reporting the thing it measured,
+which is correct — but a `lidar_status=failed` in the minutes after a
+switch-on is not yet evidence of a fault.
+
 ### Powering a LiDAR can reset its Jetson
 
 The MID-360 pulls **18 W for about 8 seconds** at startup. On **node5** that
@@ -419,10 +433,10 @@ the measured outcome.
 - **node5 resets when its LiDAR is switched on.** Reproducible; a 12 V
   headroom problem on that node. It is excluded from switching and left on
   `POWER_BACKEND=none` until the supply is fixed.
-- **node6 has no LiDAR** — it was taken away on 2026-09-15 for a hardware
-  fault, and its USB-Ethernet adapter went with it, so the node reports no
-  `enx*` interface at all. It is deliberately left alerting hourly rather than
-  marked absent, so nobody forgets it is missing.
+- ~~node6 has no LiDAR~~ — **resolved 2026-09-16 10:23.** It was away from
+  2026-09-15 for a hardware fault, taking its USB-Ethernet adapter with it, so
+  the node reported no `enx*` interface at all. Reconnected, CH341 installed,
+  switched on, `lidar_status=ok`.
 - **The root filesystem is 95% full.** Keep state small.
 - **Monitor passes take ~2 minutes**, not the 60s the timer asks for. Worth
   fixing by probing nodes in parallel, as the bot already does.
