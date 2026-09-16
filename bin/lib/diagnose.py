@@ -77,24 +77,50 @@ def collect(conf: dict, topic: str = "general",
     nodes = common.load_nodes(conf)
     rec_conf = common.recording_env(conf)
 
-    try:
-        _guardian_health(bundle, conf, state, nodes)
+    # Each section is isolated. A bug in one probe used to take the whole
+    # bundle with it: a stray OverflowError in the Tailscale parse left the
+    # answer with five facts and no mention of a single node, which reads like
+    # a quiet fleet rather than a broken probe.
+    sections = [("guardian", lambda: _guardian_health(bundle, conf, state, nodes))]
+    if topic in ("node", "fleet", "status", "general"):
+        wanted = ([n for n in nodes if n["name"] == node_name]
+                  if node_name else nodes)
+        sections.append(("fleet",
+                         lambda: _fleet(bundle, conf, wanted, state,
+                                        detailed=bool(node_name))))
+    if topic in ("recording", "status", "general"):
+        sections.append(("recording",
+                         lambda: _recording(bundle, conf, rec_conf, nodes)))
+    if topic in ("alerts", "status", "general", "node"):
+        sections.append(("alerts", lambda: _alerts(bundle, state, node_name)))
 
-        if topic in ("node", "fleet", "status", "general"):
-            wanted = ([n for n in nodes if n["name"] == node_name]
-                      if node_name else nodes)
-            _fleet(bundle, conf, wanted, state, detailed=bool(node_name))
-
-        if topic in ("recording", "status", "general"):
-            _recording(bundle, conf, rec_conf, nodes)
-
-        if topic in ("alerts", "status", "general", "node"):
-            _alerts(bundle, state, node_name)
-    except Exception as exc:                      # a probe bug must not 500
-        bundle.errors.append(f"unexpected {type(exc).__name__}: {exc}")
+    for name, run_section in sections:
+        try:
+            run_section()
+        except Exception as exc:
+            bundle.errors.append(
+                f"the {name} probes raised {type(exc).__name__}: {exc} — "
+                f"everything they would have reported is MISSING from this "
+                f"evidence, not absent from the system")
 
     bundle.elapsed = round(time.monotonic() - started, 2)
     return bundle
+
+
+def _next_firing(summary: dict) -> str:
+    """How to describe a timer's next firing without overstating it.
+
+    A monotonic timer (OnBootSec/OnUnitActiveSec, which guardian-monitor.timer
+    uses) has no realtime next-elapse. Calling that "NO next firing scheduled"
+    says the opposite of the truth about a timer firing every minute.
+    """
+    nxt = summary.get("next_elapse")
+    if nxt:
+        return f"; next {nxt:%a %d %b %H:%M}"
+    if summary.get("next_monotonic"):
+        return (f"; next firing is on a monotonic schedule relative to boot "
+                f"({summary['next_monotonic']}), so it has no wall-clock time")
+    return "; NO next firing scheduled"
 
 
 # -- is the guardian itself working? --------------------------------------
@@ -111,15 +137,15 @@ def _guardian_health(bundle: Bundle, conf: dict, state, nodes: list) -> None:
         if "error" in summary:
             bundle.add(f"{unit}", "could not be read", "unknown", summary["error"])
             continue
-        nxt = summary["next_elapse"]
         status = "ok" if summary["active"] == "active" else "bad"
         detail = f"enabled={summary['enabled']}"
         if summary["last_trigger"]:
             age = (common.now() - summary["last_trigger"]).total_seconds()
             detail += (f"; last fired {summary['last_trigger']:%H:%M:%S} "
                        f"({common.human_duration(age)} ago)")
-        detail += (f"; next {nxt:%a %H:%M}" if nxt
-                   else "; NO next firing scheduled")
+        else:
+            detail += "; no recorded last firing"
+        detail += _next_firing(summary)
         bundle.add(unit, f"{summary['active']} ({summary['sub']})",
                    status, detail)
 
@@ -322,11 +348,15 @@ def _node_facts(bundle: Bundle, res: dict, stale_max: int, disk_warn: int,
                    f"{common.human_gb(res.get('df_free_gb'))} free")
 
     wd = res.get("watchdog_timer", "?")
+    wd_age = res.get("watchdog_last_age_secs")
+    wd_detail = ("on the Jetson. This is the direct answer to a stale "
+                 "heartbeat: a dead timer means nothing is writing "
+                 "status.json, as distinct from the whole node being wedged")
+    if wd_age is not None:
+        wd_detail += (f"; last fired {common.human_duration(wd_age)} ago, "
+                      f"measured on the node against its own clock")
     bundle.add(f"{name} guardian-watchdog.timer", wd,
-               "ok" if wd == "active" else "bad",
-               "on the Jetson. This is the direct answer to a stale "
-               "heartbeat: a dead timer means nothing is writing status.json, "
-               "as distinct from the whole node being wedged")
+               "ok" if wd == "active" else "bad", wd_detail)
 
     port = res.get("udp56301", "?")
     bundle.add(f"{name} UDP 56301", port,
@@ -388,7 +418,6 @@ def _recording(bundle: Bundle, conf: dict, rec_conf: dict, nodes: list) -> None:
         if "error" in summary:
             bundle.add(unit, "could not be read", "unknown", summary["error"])
             continue
-        nxt = summary["next_elapse"]
         # `enabled` and `active` are separate facts on purpose. This timer was
         # found enabled, with its symlink in place, and inactive (dead) — so
         # nothing was going to fire it and no error said so anywhere.
@@ -397,10 +426,11 @@ def _recording(bundle: Bundle, conf: dict, rec_conf: dict, nodes: list) -> None:
         if summary["last_trigger"]:
             detail += f"; last fired {summary['last_trigger']:%a %d %b %H:%M}"
         else:
-            detail += "; never fired since this systemd user session started"
-        detail += (f"; next {nxt:%a %d %b %H:%M}" if nxt else
-                   "; NO next firing scheduled — being 'enabled' on disk does "
-                   "not mean systemd will fire it")
+            detail += "; no recorded last firing"
+        detail += _next_firing(summary)
+        if bad:
+            detail += (" — being 'enabled' on disk does not mean systemd will "
+                       "fire it")
         bundle.add(unit, f"{summary['active']} ({summary['sub']})",
                    "bad" if bad else "ok", detail)
 

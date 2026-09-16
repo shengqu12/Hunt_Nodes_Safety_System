@@ -83,20 +83,89 @@ class TestNodeInventory(unittest.TestCase):
 
 
 class TestSystemdParsing(unittest.TestCase):
-    def test_usec_infinity_is_not_a_date(self):
-        # systemd reports an unset timestamp as 2**64-1, not 0. Converting it
-        # gives a date in the year 586524, which formats fine and reads as a
-        # real "next firing" — the exact shape of fact this system must not
-        # produce.
-        self.assertIsNone(probe.usec_to_datetime("18446744073709551615"))
-        self.assertIsNone(probe.usec_to_datetime("0"))
-        self.assertIsNone(probe.usec_to_datetime(""))
-        self.assertIsNone(probe.usec_to_datetime("n/a"))
+    def test_human_timestamp_is_parsed(self):
+        # This is the format `systemctl show` actually prints, on systemd 255,
+        # even with --timestamp=unix. Reading it as an integer gives None for
+        # every timestamp, and the probe then reported lidar-record-stop.timer
+        # — which had fired the previous evening — as never having fired.
+        when = probe.parse_timestamp("Mon 2026-09-14 21:00:33 EDT")
+        self.assertIsNotNone(when)
+        self.assertEqual((when.year, when.month, when.day), (2026, 9, 14))
 
-    def test_real_usec_converts(self):
-        when = probe.usec_to_datetime("1789511091000000")
+    def test_unset_timestamps_are_none_not_dates(self):
+        # systemd writes an unset timestamp as empty, as 0, or as 2**64-1.
+        # The last one converts to the year 586524, which formats fine and
+        # reads as a real "next firing" — the exact shape of fact this system
+        # must not produce.
+        for raw in ("", "   ", "n/a", "0", "infinity",
+                    "18446744073709551615"):
+            self.assertIsNone(probe.parse_timestamp(raw), raw)
+
+    def test_unix_and_usec_forms(self):
+        self.assertEqual(probe.parse_timestamp("@1789511091").year, 2026)
+        self.assertEqual(probe.parse_timestamp("1789511091000000").year, 2026)
+
+    def test_unparseable_string_is_none_not_a_guess(self):
+        self.assertIsNone(probe.parse_timestamp("sometime last Tuesday"))
+
+
+class TestTailscaleParsing(unittest.TestCase):
+    def test_go_zero_time_is_not_a_date(self):
+        # Tailscale reports LastSeen "0001-01-01T00:00:00Z" for a peer that is
+        # currently ONLINE — Go's zero time, meaning "not applicable".
+        # astimezone() on it underflows datetime.min west of UTC, and the
+        # OverflowError took out the entire fleet bundle: the answer came back
+        # with no nodes in it at all, which reads like a quiet fleet.
+        self.assertIsNone(probe._parse_rfc3339("0001-01-01T00:00:00Z"))
+
+    def test_a_real_last_seen_parses(self):
+        when = probe._parse_rfc3339("2026-09-15T17:44:03Z")
         self.assertIsNotNone(when)
         self.assertEqual(when.year, 2026)
+
+
+class TestTimerSummary(unittest.TestCase):
+    """A monotonic timer has no wall-clock next firing. It is still firing."""
+
+    def setUp(self):
+        self._real = probe.unit_state
+
+    def tearDown(self):
+        probe.unit_state = self._real
+
+    def _summary(self, **props):
+        probe.unit_state = lambda unit: dict(
+            {"LoadState": "loaded", "ActiveState": "active",
+             "SubState": "waiting", "UnitFileState": "enabled"}, **props)
+        return probe.timer_summary("x.timer")
+
+    def test_monotonic_timer_is_not_reported_as_unscheduled(self):
+        # guardian-monitor.timer uses OnUnitActiveSec, so NextElapseUSecRealtime
+        # is empty while the timer fires every minute. Calling that "NO next
+        # firing scheduled" states the opposite of the truth.
+        out = self._summary(NextElapseUSecRealtime="",
+                            NextElapseUSecMonotonic="1month 2w 5d 22h 36min")
+        self.assertIsNone(out["next_elapse"])
+        self.assertTrue(out["next_monotonic"])
+        self.assertTrue(out["will_fire"])
+
+    def test_inactive_timer_really_has_no_next_firing(self):
+        # lidar-record-start.timer, found enabled on disk and inactive in
+        # systemd: nothing fires it, and that is the fact worth alerting on.
+        out = self._summary(ActiveState="inactive", SubState="dead",
+                            UnitFileState="linked",
+                            NextElapseUSecRealtime="",
+                            NextElapseUSecMonotonic="infinity")
+        self.assertIsNone(out["next_elapse"])
+        self.assertEqual(out["next_monotonic"], "")
+        self.assertFalse(out["will_fire"])
+
+    def test_calendar_timer_has_a_wall_clock_next_firing(self):
+        out = self._summary(
+            NextElapseUSecRealtime="Wed 2026-09-16 08:30:00 EDT",
+            NextElapseUSecMonotonic="0")
+        self.assertIsNotNone(out["next_elapse"])
+        self.assertTrue(out["will_fire"])
 
 
 class TestCalendarDays(unittest.TestCase):
@@ -293,7 +362,7 @@ class TestNodeProbe(unittest.TestCase):
         "Rhcl9zdGF0dXMiOiAib2siLCAiZGlza191c2VkX3BjdCI6IDQ3fQ==\n"
         "UDP56301=bound\n"
         "WATCHDOG_ACTIVE=active\n"
-        "WATCHDOG_LAST=1789511091000000\n"
+        "WATCHDOG_LAST_EPOCH=1789511085\n"
         "BOOTUNIT=active\n"
         "DF_PCT=47\n"
         "DF_FREE_KB=100000000\n"
@@ -327,6 +396,9 @@ class TestNodeProbe(unittest.TestCase):
         self.assertEqual(res["heartbeat_age_secs"], 10)
         self.assertEqual(res["heartbeat_age_ref"], "the node's own clock")
         self.assertIn("clock_skew_secs", res)
+        # The watchdog's last firing is converted to epoch ON the node, by the
+        # date(1) that formatted it, so this age is node-clock to node-clock.
+        self.assertEqual(res["watchdog_last_age_secs"], 15)
 
     def test_ping_failure_never_claims_anything_about_ssh(self):
         res = self._probe(ping_rc=1)
@@ -347,6 +419,28 @@ class TestNodeProbe(unittest.TestCase):
         self.assertTrue(res["ssh_ok"])
         self.assertEqual(res["status_error"], "no such file")
         self.assertNotIn("heartbeat_age_secs", res)
+
+
+class TestSectionIsolation(unittest.TestCase):
+    def setUp(self):
+        self._real = diagnose._fleet
+
+    def tearDown(self):
+        diagnose._fleet = self._real
+
+    def test_one_broken_section_does_not_empty_the_bundle(self):
+        # A stray OverflowError in the Tailscale parse used to take the whole
+        # bundle with it, leaving an answer with no nodes in it — which reads
+        # like a quiet fleet rather than a broken probe.
+        def boom(*a, **k):
+            raise OverflowError("date value out of range")
+        diagnose._fleet = boom
+        bundle = diagnose.collect({"SERVER_STATE_DIR": "/nonexistent"}, "status")
+        self.assertTrue(any("fleet probes raised OverflowError" in e
+                            for e in bundle.errors))
+        # and the failure is visible in the evidence, never as silence
+        self.assertIn("[??] probe failed", bundle.as_text())
+        self.assertIn("MISSING from this evidence", bundle.as_text())
 
 
 class TestBundle(unittest.TestCase):

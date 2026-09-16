@@ -36,8 +36,12 @@ _USEC_INFINITY = 18446744073709551615
 
 _UNIT_PROPS = ["ActiveState", "SubState", "UnitFileState", "Result",
                "LastTriggerUSec", "NextElapseUSecRealtime",
-               "ExecMainStartTimestamp", "InactiveEnterTimestamp",
-               "TimersCalendar", "LoadState"]
+               "NextElapseUSecMonotonic", "ExecMainStartTimestamp",
+               "InactiveEnterTimestamp", "TimersCalendar", "LoadState"]
+
+# NextElapseUSecMonotonic uses these for "no monotonic schedule"; a real one is
+# a duration string like "1month 2w 5d 22h 36min 10.433106s".
+_NO_MONOTONIC = ("", "0", "infinity", "n/a")
 
 
 def unit_state(unit: str) -> dict:
@@ -61,17 +65,51 @@ def unit_state(unit: str) -> dict:
     return state
 
 
-def usec_to_datetime(raw: str | None) -> dt.datetime | None:
-    """systemd's *USEC properties: microseconds since the epoch, or unset."""
+def parse_timestamp(raw: str | None) -> dt.datetime | None:
+    """A systemd timestamp property -> datetime, or None when it is unset.
+
+    `systemctl show` prints these as human strings — "Mon 2026-09-14 21:00:33
+    EDT" — not as the microseconds the property name promises, and
+    `--timestamp=unix` does not change it for these properties (checked on
+    systemd 255). Reading them as integers returns None for every one, and the
+    probe then reports a timer that fired last night as "never fired since
+    this systemd user session started". That is a confidently wrong fact, which
+    is the single thing these probes exist not to produce.
+
+    Parsing it in Python means parsing "EDT", which strptime cannot do
+    portably. So it goes back to date(1) — the tool that printed it — and
+    anything date(1) cannot read becomes None rather than a guess.
+    """
     if not raw:
         return None
+    raw = raw.strip()
+    if not raw or raw.lower() in ("n/a", "infinity", "0", "-"):
+        return None
+    if raw.startswith("@"):                  # --timestamp=unix, where honoured
+        raw = raw[1:].split(".")[0]
+    if raw.isdigit():
+        value = int(raw)
+        if value <= 0 or value == _USEC_INFINITY:
+            return None
+        # Microseconds if it is far too large to be seconds.
+        secs = value / 1e6 if value > 1e12 else value
+        try:
+            return dt.datetime.fromtimestamp(secs).astimezone()
+        except (OverflowError, OSError, ValueError):
+            return None
+    code, out, _ = common.run(["date", "-d", raw, "+%s"], timeout=5)
+    if code != 0:
+        return None
     try:
-        usec = int(raw)
+        secs = int(out.strip())
     except ValueError:
         return None
-    if usec <= 0 or usec == _USEC_INFINITY:
+    if secs <= 0:
         return None
-    return dt.datetime.fromtimestamp(usec / 1e6).astimezone()
+    try:
+        return dt.datetime.fromtimestamp(secs).astimezone()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def timer_summary(unit: str) -> dict:
@@ -85,8 +123,14 @@ def timer_summary(unit: str) -> dict:
     state = unit_state(unit)
     if "error" in state:
         return {"unit": unit, "error": state["error"]}
-    last = usec_to_datetime(state.get("LastTriggerUSec"))
-    nxt = usec_to_datetime(state.get("NextElapseUSecRealtime"))
+    last = parse_timestamp(state.get("LastTriggerUSec"))
+    nxt = parse_timestamp(state.get("NextElapseUSecRealtime"))
+    # A monotonic timer (OnBootSec/OnUnitActiveSec, as guardian-monitor.timer
+    # uses) has no realtime next-elapse at all. Reporting that as "NO next
+    # firing scheduled" says the opposite of the truth about a timer that is
+    # firing every minute, so the two cases are kept apart.
+    mono = (state.get("NextElapseUSecMonotonic") or "").strip()
+    monotonic = mono if mono.lower() not in _NO_MONOTONIC else ""
     return {
         "unit": unit,
         "load_state": state.get("LoadState", "?"),
@@ -97,7 +141,9 @@ def timer_summary(unit: str) -> dict:
         "calendar": state.get("TimersCalendar", ""),
         "last_trigger": last,
         "next_elapse": nxt,
-        "will_fire": nxt is not None and state.get("ActiveState") == "active",
+        "next_monotonic": monotonic,
+        "will_fire": (state.get("ActiveState") == "active"
+                      and (nxt is not None or bool(monotonic))),
     }
 
 
@@ -150,11 +196,25 @@ def tailscale_peers() -> dict:
 
 
 def _parse_rfc3339(raw: str | None) -> dt.datetime | None:
+    """RFC3339 -> local datetime, or None when there is no such time.
+
+    Tailscale reports `LastSeen: "0001-01-01T00:00:00Z"` for a peer that is
+    currently online — Go's zero time, meaning "not applicable", not "last
+    seen in the year 1". Converting that to a zone west of UTC underflows
+    datetime.min and raises OverflowError, which took out the whole fleet
+    bundle the first time this ran against real `tailscale status` output.
+    """
     if not raw:
         return None
     try:
-        return dt.datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone()
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
+        return None
+    if parsed.year <= 1:
+        return None
+    try:
+        return parsed.astimezone()
+    except (OverflowError, OSError, ValueError):
         return None
 
 
@@ -316,7 +376,10 @@ else
   printf 'UDP56301=%s\n' 'unbound'
 fi
 printf 'WATCHDOG_ACTIVE=%s\n' "$(systemctl is-active guardian-watchdog.timer 2>/dev/null)"
-printf 'WATCHDOG_LAST=%s\n' "$(systemctl show -p LastTriggerUSec --value guardian-watchdog.timer 2>/dev/null)"
+# Converted to epoch seconds HERE, by the same date(1) that formatted it, and
+# against the node's own clock. systemctl prints "Tue 2026-09-15 20:44:56 EDT"
+# and shipping that string home to be parsed means parsing "EDT".
+printf 'WATCHDOG_LAST_EPOCH=%s\n' "$(date -d "$(systemctl show -p LastTriggerUSec --value guardian-watchdog.timer 2>/dev/null)" +%s 2>/dev/null)"
 printf 'BOOTUNIT=%s\n' "$(systemctl is-active guardian-boot.service 2>/dev/null)"
 printf 'DF_PCT=%s\n' "$(df -P / 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')"
 printf 'DF_FREE_KB=%s\n' "$(df -P / 2>/dev/null | awk 'NR==2{print $4}')"
@@ -368,7 +431,7 @@ def node_probe(node: dict, conf: dict, timeout: float = 20.0) -> dict:
 
     result["udp56301"] = fields.get("UDP56301", "?")
     result["watchdog_timer"] = fields.get("WATCHDOG_ACTIVE", "?")
-    result["watchdog_last"] = usec_to_datetime(fields.get("WATCHDOG_LAST"))
+    watchdog_epoch = _as_int(fields.get("WATCHDOG_LAST_EPOCH"))
     result["boot_unit"] = fields.get("BOOTUNIT", "?")
     result["uptime_secs"] = _as_int(fields.get("UPTIME_SECS"))
     result["df_used_pct"] = _as_int(fields.get("DF_PCT"))
@@ -383,6 +446,8 @@ def node_probe(node: dict, conf: dict, timeout: float = 20.0) -> dict:
     node_epoch = _as_int(fields.get("NODE_EPOCH"))
     if node_epoch is not None:
         result["clock_skew_secs"] = node_epoch - int(common.now().timestamp())
+        if watchdog_epoch:
+            result["watchdog_last_age_secs"] = node_epoch - watchdog_epoch
 
     if fields.get("STATUS_ERR"):
         result["status_error"] = fields["STATUS_ERR"]
