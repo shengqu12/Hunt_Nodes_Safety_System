@@ -45,9 +45,12 @@ log = logging.getLogger("askbot")
 # different Slack apps.
 ALERT_MARKER = "[LiDAR Guardian]"
 
-# How much evidence goes into a Slack message. A `status` bundle runs to about
-# 11k characters, and Slack will not show that in one message.
-EVIDENCE_LIMIT = 2600
+# How much evidence goes into a Slack message. Grouping the fleet by symptom
+# took a `status` bundle from 69 facts / 10.8k characters to 19 / ~4k, so this
+# now fits a broken fleet whole. Slack accepts far more in `text` and collapses
+# a long message behind "Show more"; the cap is here so a runaway bundle cannot
+# push a message past what Slack will render.
+EVIDENCE_LIMIT = 5000
 
 
 class SeenEvents:

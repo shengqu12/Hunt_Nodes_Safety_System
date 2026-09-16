@@ -24,6 +24,7 @@ recollection rather than a measurement, it says so and gives its age.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -308,7 +309,7 @@ def _fleet(bundle: Bundle, conf: dict, nodes: list, state, detailed: bool) -> No
                 groups.setdefault("CPU temp at or above the warn threshold",
                                   []).append(f"{name} ({temp}C)")
             if status.get("note"):
-                notes.append(f"{name}: {str(status['note'])[:110]}")
+                notes.append((name, str(status["note"])[:160]))
 
         if res.get("udp56301") != "bound":
             groups.setdefault("UDP 56301 unbound", []).append(name)
@@ -333,7 +334,7 @@ def _fleet(bundle: Bundle, conf: dict, nodes: list, state, detailed: bool) -> No
                 "most of the fleet at once points upstream of any one node"))
 
     if notes:
-        bundle.add("Notes the nodes' own watchdogs wrote", " | ".join(notes),
+        bundle.add("Notes the nodes' own watchdogs wrote", _fold_notes(notes),
                    "info", "free text from each status.json, as old as that "
                            "node's heartbeat")
 
@@ -343,6 +344,31 @@ def _fleet(bundle: Bundle, conf: dict, nodes: list, state, detailed: bool) -> No
                    f"lidar_status ok, watchdog timer active, UDP 56301 bound, "
                    f"disk and temp under their thresholds. Ask about one by "
                    f"name for its full readings")
+
+
+def _fold_notes(notes: list) -> str:
+    """Collapse notes that differ only inside their parentheses.
+
+    Five nodes each wrote "no ping reply from LiDAR (192.168.1.x) -- monitor-
+    only, no power backend". Printed separately that is 600 characters saying
+    one thing five times, and it reads as five findings. Folded, the shared
+    sentence appears once and the nodes carry only what differs — which is
+    also the more useful fact, because the shared part is the symptom and the
+    parenthesised part is just the address.
+    """
+    groups: dict[str, list] = {}
+    for name, note in notes:
+        template = re.sub(r"\([^)]*\)", "(…)", note)
+        detail = re.findall(r"\(([^)]*)\)", note)
+        groups.setdefault(template, []).append(
+            f"{name}" + (f" {detail[0]}" if detail else ""))
+    parts = []
+    for template, names in groups.items():
+        if len(names) == 1 and "(…)" not in template:
+            parts.append(f"{names[0]}: {template}")
+        else:
+            parts.append(f'"{template}" — {", ".join(names)}')
+    return " | ".join(parts)
 
 
 # Detail text for the symptoms where the obvious reading is the wrong one.

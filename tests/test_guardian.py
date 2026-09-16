@@ -603,6 +603,29 @@ class TestFleetGrouping(unittest.TestCase):
         self.assertNotIn("nothing wrong", labels)
 
 
+class TestNoteFolding(unittest.TestCase):
+    def test_notes_differing_only_by_address_fold_to_one(self):
+        # Five nodes wrote the same sentence with a different IP in it. Printed
+        # separately that is 600 characters saying one thing five times, and it
+        # reads as five findings.
+        folded = diagnose._fold_notes([
+            ("node2", "no ping reply from LiDAR (192.168.1.130) - monitor-only"),
+            ("node4", "no ping reply from LiDAR (192.168.1.131) - monitor-only"),
+        ])
+        self.assertEqual(folded.count("no ping reply"), 1)
+        self.assertIn("node2 192.168.1.130", folded)
+        self.assertIn("node4 192.168.1.131", folded)
+
+    def test_a_genuinely_different_note_stays_separate(self):
+        folded = diagnose._fold_notes([
+            ("node2", "no ping reply from LiDAR (192.168.1.130)"),
+            ("node7", "recovered after 2 power cycles"),
+        ])
+        self.assertIn("recovered after 2 power cycles", folded)
+        self.assertIn("no ping reply", folded)
+        self.assertIn("|", folded)
+
+
 class TestBundle(unittest.TestCase):
     def test_worst_ranks_bad_over_warn_over_unknown(self):
         bundle = diagnose.Bundle(topic="t")
