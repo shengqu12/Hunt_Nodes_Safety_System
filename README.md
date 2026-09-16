@@ -114,6 +114,7 @@ line to `nodes.list`. Done.
 | NODE DOWN: unreachable | server | Jetson lost power/WiFi/crashed |
 | Watchdog heartbeat stale | server | Jetson up but guardian timer stopped |
 | Disk N% full | node | Check for leftover rosbags |
+| RECORDING NOT RUNNING | server | Inside the recording window with no session on the lab server |
 | RECOVERED: … | both | Matching all-clear for any of the above |
 
 ## Daily morning brief
@@ -126,8 +127,43 @@ The brief is also the monitor's own heartbeat — if puget or the monitor dies,
 no brief arrives, so silence stops being indistinguishable from health.
 
 Test it without sending: `server/daily_report.sh --print`.
-Set `RECORDER_PATTERN` in `server.env` to match how you actually launch
-recording, or the "Recording" line will be wrong.
+
+The `Recording:` line is measured **on the lab server**, by
+`server/recording_status.sh`, because that is where recording runs:
+`record_day.sh` launches `record_supervisor.py` there and it subscribes to the
+nodes over the network. Nothing records on a Jetson. (This line used to
+`pgrep` for the recorder on each node, where no such process has ever existed,
+so it could only ever say "none active".) Run the probe on its own to see the
+raw measurements:
+
+```bash
+server/recording_status.sh
+```
+
+## Slack ask-bot
+
+`bin/askbot.py` answers questions in Slack — reply `why` under an alert, or
+ask about a node, about recording, or about overnight alerts. It runs as
+`guardian-askbot.service` in Socket Mode, because the lab server has no public
+ingress and Slack cannot POST to it.
+
+The model is never given a shell or any say in what gets looked at. A fixed
+bundle of read-only probes collects the facts, the model explains them, and
+the raw evidence is posted with every answer. The bot cannot change anything.
+
+```bash
+python3 bin/askbot.py --probe recording      # raw evidence, no model at all
+python3 bin/askbot.py --probe node --node node3
+python3 bin/askbot.py --ask "why is node3 down?"
+python3 bin/askbot.py --check-slack          # validate the Slack app setup
+python3 tests/test_guardian.py               # stdlib unittest, no pytest
+```
+
+Setup is in [`CLAUDE.md`](CLAUDE.md): paste `config/slack-app-manifest.yaml`
+into <https://api.slack.com/apps>, collect the `xapp-`/`xoxb-` tokens, put
+them in `config/server.env`, `/invite` the bot, and re-run
+`./install_server.sh`. Without a token the installer skips the bot rather than
+installing a unit that cannot start.
 
 ## Gotcha: ssh inside a `while read` loop
 
@@ -144,10 +180,17 @@ remote host.
 
 ```
 bin/            lib.sh, lidar_power.sh, boot_sequence.sh, watchdog.sh   (Jetson)
-server/         monitor.sh, alert.sh                                    (lab server)
-systemd/        guardian-boot, guardian-watchdog(.timer), guardian-monitor(.timer)
-config/         *.example templates — real configs are gitignored
+bin/askbot.py   the Slack ask-bot                                       (lab server)
+bin/lib/        probe.py, diagnose.py, llm.py, common.py — the bot's guts
+server/         monitor.sh, daily_report.sh, alert.sh, recording_status.sh
+systemd/        guardian-boot, guardian-watchdog(.timer), guardian-monitor(.timer),
+                guardian-report(.timer), guardian-askbot.service
+config/         *.example templates + slack-app-manifest.yaml
+                — real configs are gitignored
+tests/          test_guardian.py
 ```
+
+Design notes and the reasoning behind all of it: [`CLAUDE.md`](CLAUDE.md).
 
 Logs: node `/var/lib/lidar-guardian/guardian.log`; server
 `~/.lidar-guardian-server/{monitor,alerts}.log`.
