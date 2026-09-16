@@ -1,0 +1,23 @@
+[Unit]
+Description=LiDAR Guardian — Slack ask-bot (Socket Mode)
+Documentation=https://github.com/shengqu12/Hunt_Nodes_Safety_System
+After=network-online.target
+Wants=network-online.target
+# Deliberately NO OnFailure= hook: the bot is a convenience and the guardian
+# does not depend on it. A crash-looping bot must not turn into a stream of
+# Slack alerts about itself — Restart= below handles that, and the bot's
+# absence is obvious the moment you ask it something.
+
+[Service]
+Type=simple
+WorkingDirectory=__GUARDIAN_HOME__
+Environment=GUARDIAN_HOME=__GUARDIAN_HOME__
+ExecStart=__GUARDIAN_HOME__/.venv/bin/python __GUARDIAN_HOME__/bin/askbot.py
+Restart=always
+RestartSec=30
+# Long-lived WebSocket: give up and reconnect rather than sit on a dead socket.
+TimeoutStopSec=20
+Nice=10
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,67 @@
+# Slack app manifest for the LiDAR Guardian ask-bot.
+#
+# Fastest setup: https://api.slack.com/apps -> your app -> App Manifest,
+# switch the editor to YAML, replace everything with this, Save Changes.
+# That sets the scopes, the events and Socket Mode in one step, in the right
+# order — the click-through path makes you add scopes and then remember to
+# reinstall, and forgetting that is the usual reason the bot stays silent with
+# no error visible anywhere.
+#
+# This must be a SECOND Slack app, separate from the incoming webhook the
+# guardian already uses for alerts. A webhook can only send; receiving a
+# question needs a bot user, and reaching a server with no public ingress
+# needs Socket Mode.
+#
+# Afterwards two things stay manual, because Slack will not put secrets in a
+# manifest:
+#   1. Basic Information -> App-Level Tokens -> Generate Token and Scopes,
+#      name it "socket", add scope connections:write   -> gives the xapp- token
+#      (shown once — copy it immediately)
+#   2. OAuth & Permissions -> Install to Workspace     -> gives the xoxb- token
+#
+# Then: /invite @LiDAR Guardian in the alert channel (the step most often
+# missed), put both tokens in config/server.env, and run
+#   python3 bin/askbot.py --check-slack
+display_information:
+  name: LiDAR Guardian
+  description: Explains LiDAR fleet alerts — nodes, heartbeats and recording
+  background_color: "#1f3a5f"
+
+features:
+  bot_user:
+    display_name: LiDAR Guardian
+    # Socket Mode holds an open connection, so the bot really is online
+    # whenever the lab server is.
+    always_online: true
+  app_home:
+    home_tab_enabled: false
+    # Lets you DM the bot instead of using a channel.
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read   # see @LiDAR Guardian
+      - chat:write          # post answers
+      - channels:history    # read the alert thread in a public channel
+      - groups:history      # ... and in a private channel
+      - im:history          # read DMs
+      - im:write            # reply in DMs
+      # Deliberately NOT channels:read. The bot reads history in channels it
+      # was invited to; it never browses the workspace.
+
+settings:
+  socket_mode_enabled: true
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.channels
+      - message.groups
+      - message.im
+  interactivity:
+    # This bot only reads, so there is nothing to confirm and no need for an
+    # interactivity endpoint.
+    is_enabled: false
+  org_deploy_enabled: false
+  token_rotation_enabled: false

@@ -2,3 +2,6 @@ config/guardian.env
 config/server.env
 config/nodes.list
 *.log
+.venv/
+__pycache__/
+*.pyc
