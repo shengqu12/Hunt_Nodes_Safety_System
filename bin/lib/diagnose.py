@@ -48,17 +48,49 @@ class Bundle:
     def add(self, label, value, status="info", detail="") -> None:
         self.facts.append(Fact(label, str(value), status, detail))
 
-    def as_text(self) -> str:
-        """The exact evidence handed to the model — and shown to the human."""
-        lines = []
-        for fact in self.facts:
-            mark = {"ok": "OK", "warn": "WARN", "bad": "BAD",
-                    "unknown": "??", "info": "--"}.get(fact.status, "--")
-            lines.append(f"[{mark}] {fact.label}: {fact.value}"
-                         + (f"  ({fact.detail})" if fact.detail else ""))
-        for err in self.errors:
-            lines.append(f"[??] probe failed: {err}")
-        return "\n".join(lines)
+    MARKS = {"ok": "OK", "warn": "WARN", "bad": "BAD",
+             "unknown": "??", "info": "--"}
+
+    def _line(self, fact) -> str:
+        mark = self.MARKS.get(fact.status, "--")
+        return (f"[{mark}] {fact.label}: {fact.value}"
+                + (f"  ({fact.detail})" if fact.detail else ""))
+
+    def as_text(self, max_chars: int | None = None) -> str:
+        """The exact evidence handed to the model — and shown to the human.
+
+        With a budget, drop the healthy facts before the unhealthy ones and
+        **say what was dropped**. Evidence exists so a human can check the
+        answer; silently cutting three quarters of it leaves them unable to
+        tell a quiet fleet from a cut-off message, which is the same ambiguity
+        this whole design is arranged against. A `status` bundle is ~69 facts
+        and ~11k characters, and Slack will not show that in one message.
+        """
+        lines = [self._line(f) for f in self.facts]
+        lines += [f"[??] probe failed: {err}" for err in self.errors]
+        text = "\n".join(lines)
+        if max_chars is None or len(text) <= max_chars:
+            return text
+
+        # Keep everything that is not OK, in order; summarise the rest.
+        keep = [f for f in self.facts if f.status != "ok"]
+        dropped = [f for f in self.facts if f.status == "ok"]
+        lines = [self._line(f) for f in keep]
+        lines += [f"[??] probe failed: {err}" for err in self.errors]
+        if dropped:
+            names = ", ".join(f.label for f in dropped)
+            lines.append(f"[OK] {len(dropped)} further checks were all OK and "
+                         f"are summarised here rather than listed: {names}")
+        text = "\n".join(lines)
+
+        if len(text) > max_chars:
+            cut = text[:max_chars].rsplit("\n", 1)[0]
+            shown = cut.count("\n") + 1
+            total = len(lines)
+            text = (cut + f"\n... TRUNCATED: {total - shown} of {total} lines "
+                          f"are not shown. Full evidence: "
+                          f"python3 bin/askbot.py --probe {self.topic}")
+        return text
 
     @property
     def worst(self) -> str:
@@ -120,6 +152,12 @@ def _next_firing(summary: dict) -> str:
     if summary.get("next_monotonic"):
         return (f"; next firing is on a monotonic schedule relative to boot "
                 f"({summary['next_monotonic']}), so it has no wall-clock time")
+    # A timer whose unit is running right now has no next elapse yet: systemd
+    # computes it when the unit finishes. Reporting that as "NO next firing
+    # scheduled" says a healthy every-minute timer is dead.
+    if summary.get("active") == "active" and summary.get("sub") == "running":
+        return ("; the unit it triggers is running right now, so the next "
+                "elapse is not computed yet")
     return "; NO next firing scheduled"
 
 
@@ -261,14 +299,21 @@ def _fleet(bundle: Bundle, conf: dict, nodes: list, state, detailed: bool) -> No
                        f"measured now: {res.get('error', '?')}")
             continue
 
-        _node_facts(bundle, res, stale_max, disk_warn, temp_warn, detailed)
-        if not _node_has_issue(res, stale_max, disk_warn, temp_warn):
+        # Only expand a node that has something wrong, unless the question
+        # named one. Seven healthy nodes at seven facts each buried the two
+        # broken ones and blew past what Slack will show in a message.
+        if detailed or _node_has_issue(res, stale_max, disk_warn, temp_warn):
+            _node_facts(bundle, res, stale_max, disk_warn, temp_warn, detailed)
+        else:
             healthy.append(name)
 
     if healthy and not detailed:
         bundle.add("Nodes with nothing wrong", ", ".join(healthy), "ok",
                    f"{len(healthy)} of {len(results)} probed, measured now over "
-                   f"ping + one SSH each")
+                   f"ping + one SSH each: heartbeat fresh, lidar_status ok, "
+                   f"watchdog timer active, UDP 56301 bound, disk and temp "
+                   f"under their thresholds. Ask about one by name for its "
+                   f"full readings")
 
 
 def _node_has_issue(res: dict, stale_max: int, disk_warn: int,

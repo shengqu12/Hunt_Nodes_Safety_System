@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import ssl
+import time
 import urllib.error
 import urllib.request
 
@@ -66,11 +67,15 @@ class OllamaBackend(Backend):
 
     def __init__(self, model: str = "gemma3:27b",
                  url: str = "http://localhost:11434", timeout: float = 120.0,
-                 num_predict: int = 260):
+                 num_predict: int = 260, keep_alive: str = "30m"):
         self.model = model
         self.url = url.rstrip("/")
         self.timeout = timeout
         self.num_predict = num_predict
+        # Hold the model in VRAM between questions. A 17 GB model takes ~10s
+        # to load, and ollama answers 500 to anything that arrives while it is
+        # loading — which is exactly what a duplicate Slack delivery did.
+        self.keep_alive = keep_alive
 
     def complete(self, question: str, evidence: str) -> str:
         payload = {
@@ -82,22 +87,39 @@ class OllamaBackend(Backend):
             # creative task, and a confident wrong diagnosis is the main risk
             # this whole design is arranged against.
             "options": {"temperature": 0.2, "num_predict": self.num_predict},
+            "keep_alive": self.keep_alive,
         }
-        req = urllib.request.Request(
-            f"{self.url}/api/generate",
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                data = json.loads(resp.read())
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise LLMError(f"ollama at {self.url} did not answer: {exc}") from exc
-        except json.JSONDecodeError as exc:
-            raise LLMError(f"ollama returned non-JSON: {exc}") from exc
-        text = (data.get("response") or "").strip()
-        if not text:
-            raise LLMError("ollama returned an empty answer")
-        return text
+        body = json.dumps(payload).encode()
+
+        last = None
+        # One retry, and only for a server-side failure. A cold load takes
+        # ~10s and returns 500 to anything arriving during it; retrying a
+        # model that is merely slow would just queue another 17 GB load.
+        for attempt in (1, 2):
+            req = urllib.request.Request(
+                f"{self.url}/api/generate", data=body,
+                headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read())
+            except urllib.error.HTTPError as exc:
+                last = exc
+                if attempt == 1 and 500 <= exc.code < 600:
+                    time.sleep(3)
+                    continue
+                raise LLMError(
+                    f"ollama at {self.url} returned HTTP {exc.code}") from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                raise LLMError(
+                    f"ollama at {self.url} did not answer: {exc}") from exc
+            except json.JSONDecodeError as exc:
+                raise LLMError(f"ollama returned non-JSON: {exc}") from exc
+
+            text = (data.get("response") or "").strip()
+            if not text:
+                raise LLMError("ollama returned an empty answer")
+            return text
+        raise LLMError(f"ollama at {self.url} failed twice: {last}")
 
 
 class ClaudeBackend(Backend):

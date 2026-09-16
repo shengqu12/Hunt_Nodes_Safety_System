@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
+import askbot                                # noqa: E402
 from lib import common, diagnose, probe      # noqa: E402
 
 
@@ -455,6 +456,81 @@ class TestSectionIsolation(unittest.TestCase):
         # and the failure is visible in the evidence, never as silence
         self.assertIn("[??] probe failed", bundle.as_text())
         self.assertIn("MISSING from this evidence", bundle.as_text())
+
+
+class TestDuplicateDelivery(unittest.TestCase):
+    """One @mention in a channel arrives as TWO events."""
+
+    def test_app_mention_and_message_collapse_to_one_answer(self):
+        # Slack delivers app_mention AND message.channels for the same
+        # message. Both were answered, 120ms apart, and the pair hitting a
+        # cold ollama concurrently is what made the second fail with HTTP 500.
+        seen = askbot.SeenEvents()
+        mention = {"type": "app_mention", "channel": "C1", "ts": "1789.1",
+                   "client_msg_id": "abc-123"}
+        message = {"type": "message", "channel": "C1", "ts": "1789.1",
+                   "client_msg_id": "abc-123"}
+        self.assertTrue(seen.claim(askbot.event_key(mention)))
+        self.assertFalse(seen.claim(askbot.event_key(message)))
+
+    def test_slack_redelivery_is_also_suppressed(self):
+        seen = askbot.SeenEvents()
+        event = {"channel": "C1", "ts": "1789.1"}     # no client_msg_id
+        self.assertEqual(askbot.event_key(event), "C1:1789.1")
+        self.assertTrue(seen.claim(askbot.event_key(event)))
+        self.assertFalse(seen.claim(askbot.event_key(event)))
+
+    def test_distinct_messages_are_both_answered(self):
+        seen = askbot.SeenEvents()
+        self.assertTrue(seen.claim("a"))
+        self.assertTrue(seen.claim("b"))
+
+    def test_an_unidentifiable_event_is_answered_rather_than_dropped(self):
+        # Answering twice is a nuisance; never answering is a broken bot.
+        seen = askbot.SeenEvents()
+        self.assertTrue(seen.claim(""))
+        self.assertTrue(seen.claim(""))
+
+    def test_memory_is_bounded(self):
+        seen = askbot.SeenEvents(limit=3)
+        for i in range(10):
+            seen.claim(f"k{i}")
+        self.assertEqual(len(seen._seen), 3)
+        self.assertTrue(seen.claim("k0"))      # oldest was evicted
+
+
+class TestEvidenceBudget(unittest.TestCase):
+    """Evidence exists so a human can check the answer."""
+
+    def _bundle(self):
+        bundle = diagnose.Bundle(topic="status")
+        for i in range(40):
+            bundle.add(f"node{i} something", "fine", "ok", "x" * 120)
+        bundle.add("node3 lidar_status", "failed", "bad", "the thing that matters")
+        bundle.add("Recording session", "none", "warn", "also matters")
+        return bundle
+
+    def test_no_budget_keeps_everything(self):
+        bundle = self._bundle()
+        self.assertEqual(len(bundle.as_text().splitlines()), 42)
+
+    def test_unhealthy_facts_survive_the_budget(self):
+        # Truncating in order threw away three quarters of a status bundle and
+        # kept the healthy start of it. What matters must survive.
+        text = self._bundle().as_text(max_chars=1200)
+        self.assertIn("node3 lidar_status: failed", text)
+        self.assertIn("Recording session: none", text)
+
+    def test_dropped_facts_are_announced_never_silent(self):
+        # A silently cut message is indistinguishable from a quiet fleet.
+        text = self._bundle().as_text(max_chars=1200)
+        self.assertIn("40 further checks were all OK", text)
+
+    def test_a_hard_cut_says_so_and_says_where_the_rest_is(self):
+        text = self._bundle().as_text(max_chars=200)
+        self.assertIn("TRUNCATED", text)
+        self.assertIn("--probe status", text)
+        self.assertLessEqual(len(text.split("... TRUNCATED")[0]), 200)
 
 
 class TestBundle(unittest.TestCase):

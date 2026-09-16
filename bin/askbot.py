@@ -28,7 +28,9 @@ import json
 import logging
 import re
 import sys
+import threading
 import traceback
+from collections import OrderedDict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -38,8 +40,51 @@ from lib import common, diagnose, llm      # noqa: E402
 log = logging.getLogger("askbot")
 
 # alert.sh prefixes every message it posts with this, which is how a reply is
-# recognised as a reply to one of our own alerts.
+# recognised as a reply to one of our own alerts. It is matched on the message
+# TEXT, not on who posted it, so the alert webhook and this bot can be
+# different Slack apps.
 ALERT_MARKER = "[LiDAR Guardian]"
+
+# How much evidence goes into a Slack message. A `status` bundle runs to about
+# 11k characters, and Slack will not show that in one message.
+EVIDENCE_LIMIT = 2600
+
+
+class SeenEvents:
+    """Remember which messages have been answered.
+
+    @mentioning the bot in a channel delivers TWO events for one message —
+    `app_mention` and `message.channels` — and Slack additionally redelivers
+    anything it thinks went unacknowledged. Both produced duplicate answers
+    within 120ms of each other, and the pair of them hitting a cold ollama
+    concurrently is what made the second one fail with HTTP 500.
+
+    Keyed on the message, not the event, so both delivery paths collapse to
+    one. Bounded, because this process is long-lived.
+    """
+
+    def __init__(self, limit: int = 512):
+        self._seen: OrderedDict = OrderedDict()
+        self._limit = limit
+        self._lock = threading.Lock()
+
+    def claim(self, key: str) -> bool:
+        """True the first time a key is seen, False every time after."""
+        if not key:
+            return True                  # cannot dedup it; answering once is
+        with self._lock:                 # better than never answering
+            if key in self._seen:
+                return False
+            self._seen[key] = True
+            while len(self._seen) > self._limit:
+                self._seen.popitem(last=False)
+        return True
+
+
+def event_key(event: dict) -> str:
+    """Identify the MESSAGE, so its two event types collapse to one."""
+    return (event.get("client_msg_id")
+            or f"{event.get('channel', '')}:{event.get('ts', '')}")
 
 HELP = """*What you can ask me*
 • `why` (under an alert, or on its own) — what the guardian found and the \
@@ -94,7 +139,10 @@ def answer(conf: dict, question: str, topic: str, node: str | None,
            backend: llm.Backend) -> tuple:
     """Collect evidence, then have the model explain it. Returns (reply, bundle)."""
     bundle = diagnose.collect(conf, topic, node_name=node)
-    evidence = bundle.as_text()
+    # The model is given exactly what the human is shown. Handing it facts
+    # that were cut from the reply would make its answer uncheckable, which is
+    # the whole reason the evidence is posted at all.
+    evidence = bundle.as_text(max_chars=EVIDENCE_LIMIT)
 
     try:
         explanation = backend.complete(question, evidence)
@@ -110,7 +158,7 @@ def answer(conf: dict, question: str, topic: str, node: str | None,
              f"_evidence ({bundle.topic}"
              + (f"/{node}" if node else "")
              + f"), collected in {bundle.elapsed}s_\n"
-             f"```\n{evidence[:2600]}\n```")
+             + f"```\n{evidence}\n```")
     return reply, bundle
 
 
@@ -315,6 +363,7 @@ def run_slack(conf: dict, backend: llm.Backend) -> int:
     bot_user_id = web.auth_test()["user_id"]
     log.info("connected as bot user %s", bot_user_id)
     socket = SocketModeClient(app_token=app_token, web_client=web)
+    seen = SeenEvents()
 
     def is_alert_thread(channel: str, thread_ts: str | None) -> bool:
         """Did this thread start with one of our own alerts?
@@ -357,6 +406,14 @@ def run_slack(conf: dict, backend: llm.Backend) -> int:
         in_alert = is_alert_thread(channel, thread_ts)
         if not (mentioned or is_dm or in_alert):
             return                       # stay quiet in normal conversation
+
+        # Claimed only once we have decided to answer, so a message we ignore
+        # never occupies a slot.
+        key = event_key(event)
+        if not seen.claim(key):
+            log.info("duplicate delivery of %s (%s); already answered",
+                     key, event.get("type"))
+            return
 
         reply_ts = thread_ts or event.get("ts")
         try:
