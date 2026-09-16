@@ -708,6 +708,17 @@ class TestPowerExecution(unittest.TestCase):
         self.assertEqual(out[0]["outcome"], "refused")
         self.assertIn("no relay serial device", out[0]["why"])
 
+    def test_refuses_an_excluded_node(self):
+        # node5 resets every time its LiDAR is energised. The block belongs in
+        # the code path, not only in a document.
+        probe.node_probe = lambda n, c, timeout=20.0: self._node(name="node5")
+        req = actions.PowerRequest("on", [{"name": "node5", "ip": "10.0.0.5",
+                                          "user": "kelrod"}])
+        out = actions.execute(req, {"POWER_EXCLUDE_NODES": "node5"},
+                              Path(tempfile.mkdtemp()))
+        self.assertEqual(out[0]["outcome"], "refused")
+        self.assertIn("resets the node", out[0]["why"])
+
     def test_refuses_a_node_that_has_just_booted(self):
         probe.node_probe = lambda n, c, timeout=20.0: self._node(uptime_secs=10)
         req = actions.PowerRequest("on", [{"name": "node4", "ip": "10.0.0.4",

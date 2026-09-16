@@ -138,7 +138,22 @@ def execute(request: PowerRequest, conf: dict, state: Path) -> list:
     return results
 
 
+def excluded(conf: dict) -> set:
+    raw = (conf.get("POWER_EXCLUDE_NODES") or "").strip()
+    return {n.strip() for n in re.split(r"[,\s]+", raw) if n.strip()}
+
+
 def _one_node(node: dict, verb: str, conf: dict) -> dict:
+    # A node whose supply cannot take its own LiDAR's inrush must not be
+    # switchable from a chat message. node5 resets every time; without this,
+    # anyone typing "power on lidar 5" knocks it over, and the reason lives
+    # only in a document nobody has open.
+    if node["name"] in excluded(conf):
+        return {"outcome": "refused",
+                "why": f"{node['name']} is in POWER_EXCLUDE_NODES: switching "
+                       f"its LiDAR on resets the node, reproducibly. Fix the "
+                       f"12 V headroom, then remove it from that list."}
+
     min_uptime = common.conf_int(conf, "POWER_MIN_UPTIME_SECS", 120)
     max_load = common.conf_float(conf, "POWER_MAX_LOAD", 2.0)
     settle = common.conf_int(conf, "POWER_SETTLE_SECS", 30)

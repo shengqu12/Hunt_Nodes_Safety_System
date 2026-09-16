@@ -50,6 +50,30 @@ live check, and it moves through `unknown` and `degraded` on the way to
 hardware): they detect a dead LiDAR and can do nothing about it, so `failed`
 there means "waiting for a human", not "gave up after cycling".
 
+### Carrier is the fact that ping cannot give you
+
+Each LiDAR hangs off a USB-Ethernet adapter on its Jetson (`enx*`, RTL8153).
+`/sys/class/net/<if>/carrier` is the physical layer: **1 means something is
+powered at the far end of that cable.** It is local to the node, needs no
+network round trip, and separates "the LiDAR has no power" from "the LiDAR is
+powered but not answering at IP level".
+
+On the night the relays were fitted, six nodes reported `lidar_status=failed`
+and every node had UDP 56301 unbound. The model's reading of that was that the
+LiDAR devices had failed and their power should be checked. The actual state
+was `carrier=0`: the LiDARs were simply **switched off**, because the relays
+had just been installed and are wired COM+NO, which is open when unpowered.
+`lidar_status` and UDP 56301 are both downstream of carrier, so on a node with
+carrier 0 they are consequences, not findings.
+
+Powering a LiDAR takes carrier 0 → 1 in about 8 seconds, and the interface
+then picks up its address (`192.168.1.5/24` on most nodes).
+
+**node7 is on a different subnet and that is correct.** Its link comes up as
+`192.168.113.203/24` and its configured `LIDAR_IP=192.168.113.158` answers
+there, 0% loss. It looks like a typo for `192.168.1.158` and is not one;
+measured 2026-09-16 after power-on.
+
 ### Tailscale knows things ping does not
 
 `tailscale status --json` reports `Online` and `LastSeen` per peer. A node that
@@ -63,6 +87,69 @@ Two traps in that JSON:
   time, meaning "not applicable". `astimezone()` on it underflows
   `datetime.min` west of UTC and raises `OverflowError`.
 - The `Peer` map is keyed by node key, not by IP; index it by `TailscaleIPs`.
+
+## The LiDAR power switches
+
+Every node has an LCUS-style USB relay on a CH340 bridge (`1a86:7523`),
+switching the LiDAR's 12 V line. Reference: `relay-control-reference.md` and
+`jetson-ch341-relay-setup.md`.
+
+- 9600 8N1 raw, four bytes: `0xA0`, channel, state, checksum. Channel 1 is the
+  LiDAR. ON `A0 01 01 A2`, OFF `A0 01 00 A1`.
+- Driven through `/dev/serial/by-path/platform-3610000.usb-usb-0:2.3:1.0-port0`,
+  not `/dev/ttyUSB0`, which shifts if another serial device appears.
+- **Write-only.** No acknowledgement, no state query, nothing to poll. The
+  only feedback is a click and an LED. So "the bytes were written" is never
+  reported as "the LiDAR came up" — carrier is.
+- **Not persistent.** The relay drops open on reboot, USB disconnect or power
+  loss, so a node that resets comes back with its LiDAR off.
+- Idempotent: sending ON twice is a no-op at the coil.
+
+### Two things that stop this working
+
+**`brltty` steals the port.** It claims the CH340 about 1.6 seconds after the
+device node appears:
+
+```
+ch341 1-2.3:1.0: ch341-uart converter detected
+usb 1-2.3: ch341-uart converter now attached to ttyUSB0
+usb 1-2.3: usbfs: interface 0 claimed by ch341 while 'brltty' sets config #1
+ch341-uart ttyUSB0: ch341-uart converter now disconnected from ttyUSB0
+```
+
+`sudo apt remove brltty`, then reload `ch341`. This is why node2 had the
+module installed and stashed and still had no `/dev/ttyUSB0`.
+
+**JetPack 6 ships no `ch341.ko`.** Every node runs `5.15.148-tegra` and every
+node's stashed module has the same vermagic, so installing it on a new node is
+a copy from another node plus `depmod -a` — no git clone, no internet on the
+Jetson. The vermagic gate against the local `ftdi_sio.ko` still runs per unit.
+
+### Powering a LiDAR can reset its Jetson
+
+The MID-360 pulls **18 W for about 8 seconds** at startup. On **node5** that
+resets the node — observed twice, at 9 hours uptime and 0.3 load, so it is a
+12 V headroom fault and not a timing one. node1, node2, node3, node4 and node7
+all survive the same transient.
+
+This is the brownout the whole repo was built around, arriving from the other
+direction: the staged boot sequence protects the Jetson at boot, and nothing
+protected it against a switch-on later.
+
+Consequences encoded in the code:
+
+- `POWER_EXCLUDE_NODES="node5"` — the bot refuses to switch it, with the
+  reason. A block that lives only in a document does not stop anyone typing
+  "power on lidar 5".
+- **node5 keeps `POWER_BACKEND=none`.** Setting it would make
+  `guardian-boot.service` power the LiDAR on every boot, reset the node, and
+  boot-loop. node2, node4 and node7 are set to `cmd` with the by-path device,
+  matching node1.
+- Verification polls **from the lab server**, never over a session held open
+  on the node: an action that kills the host must not also kill the record of
+  what it did. A changed `boot_id` is the signal, and it is reported as
+  `node_reset` with the reason, never as "failed" — "failed" sends someone to
+  look at the relay.
 
 ## Where recording actually runs
 
@@ -296,6 +383,28 @@ cd ~/lidar-node-guardian && git pull && ./install_server.sh
 through git. `install_server.sh` re-applies `chmod 600` to `server.env` on
 every run and is safe to re-run.
 
+### What the bot can change
+
+Only a LiDAR's power switch, only on nodes named in the message, only through
+`lib/actions.py`.
+
+Intent is parsed by **rules**, never by the model — the same split as the rest
+of this design. gemma3:27b twice in one evening asserted things its evidence
+did not say, once recommending that power be checked on nodes that were
+reporting normally; a component that can be confidently wrong must not be the
+one that cuts power to hardware. A message that does not parse unambiguously
+does nothing and asks. "restart the recording", "restart in 5 minutes" and
+"why is lidar 4 failed" all fall through to the question path, and a node
+number only counts when it is attached to a word that names a node.
+
+`on` runs directly: idempotent, safe in direction, and what people type in a
+hurry. `off` and `cycle` wait for `confirm`, and both are refused while a
+recording session is running — the person in Slack cannot see that a capture
+is in progress, and it is their day's data.
+
+Every action appends to `actions.log` with the request text, the parse, and
+the measured outcome.
+
 ## Open problems this does not fix
 
 - **Recording will not start tomorrow.** 106 GB free against a 145 GB start
@@ -307,6 +416,13 @@ every run and is safe to re-run.
 - **`RECORD_EXCLUDE_NODES=node1`** with a comment block describing node3. The
   value is what takes effect; the comment is stale. An excluded node cannot
   veto a start, so a stale exclusion silently accepts a dead node.
+- **node5 resets when its LiDAR is switched on.** Reproducible; a 12 V
+  headroom problem on that node. It is excluded from switching and left on
+  `POWER_BACKEND=none` until the supply is fixed.
+- **node6 has no LiDAR** — it was taken away on 2026-09-15 for a hardware
+  fault, and its USB-Ethernet adapter went with it, so the node reports no
+  `enx*` interface at all. It is deliberately left alerting hourly rather than
+  marked absent, so nobody forgets it is missing.
 - **The root filesystem is 95% full.** Keep state small.
 - **Monitor passes take ~2 minutes**, not the 60s the timer asks for. Worth
   fixing by probing nodes in parallel, as the bot already does.
