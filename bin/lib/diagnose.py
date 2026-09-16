@@ -334,9 +334,22 @@ def _fleet(bundle: Bundle, conf: dict, nodes: list, state, detailed: bool) -> No
                 "most of the fleet at once points upstream of any one node"))
 
     if notes:
+        detail = ("free text from each status.json, as old as that node's "
+                  "heartbeat")
+        if any("no power backend" in note for _n, note in notes):
+            # Observed: the model read this as "the Jetsons have lost power"
+            # and advised checking their power supply. It means the opposite
+            # kind of thing — the node is up and reporting, it simply has no
+            # relay wired in to power-cycle its LiDAR with. Free text the node
+            # wrote is still a fact we are handing over, and an ambiguous one
+            # is worse than a missing one, so it gets glossed here.
+            detail += ('. "monitor-only, no power backend" means that node is '
+                       'configured POWER_BACKEND=none: it has no relay to '
+                       'power-cycle its LiDAR with, so it can detect the fault '
+                       'and not act on it. It does NOT mean the Jetson has '
+                       'lost power — a node that had would not be reporting')
         bundle.add("Notes the nodes' own watchdogs wrote", _fold_notes(notes),
-                   "info", "free text from each status.json, as old as that "
-                           "node's heartbeat")
+                   "info", detail)
 
     if healthy:
         bundle.add("Nodes with nothing wrong", ", ".join(healthy), "ok",
@@ -375,8 +388,11 @@ def _fold_notes(notes: list) -> str:
 _SYMPTOM_DETAIL = {
     "UDP 56301 unbound":
         "measured with `ss -uln` on each Jetson: nothing holds the Livox "
-        "driver's port. Bound would not prove the driver is publishing, only "
-        "that the socket is open",
+        "driver's port, i.e. the driver PROCESS is not running there. Bound "
+        "would not prove the driver is publishing, only that the socket is "
+        "open. This is a different measurement from lidar_status, which is "
+        "the node pinging the LiDAR DEVICE: a node can have a healthy device "
+        "and no driver, or a running driver and a dead device",
     "heartbeat stale":
         "age measured against each node's own clock; the guardian calls it "
         "stale above its HEARTBEAT_MAX_AGE",
