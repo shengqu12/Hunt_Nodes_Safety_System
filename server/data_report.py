@@ -478,7 +478,8 @@ def cmd_post(ctx: Ctx, a) -> int:
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "a") as f:
         f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"), "date": str(d),
-                            "backfill": a.backfill, "rc": rc, "subject": subject}) + "\n")
+                            "backfill": a.backfill, "rc": rc, "subject": subject, "body": body},
+                           ensure_ascii=False) + "\n")
     if not a.backfill and should_stop(today):
         print(f"last scheduled report ({LAST_POST}) posted: disabling {TIMERS}")
         disable_timers()
