@@ -1,0 +1,7 @@
+[Unit]
+Description=LiDAR data-collection report for yesterday's session (analysis window, 7 days)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/lidar-node-guardian/server/data_report.py post
+Environment=GUARDIAN_HOME=%h/lidar-node-guardian

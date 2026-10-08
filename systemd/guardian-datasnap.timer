@@ -1,0 +1,11 @@
+[Unit]
+Description=Snapshot the session that stopped at 03:00 while it is still on puget's disk
+
+[Timer]
+# 10 minutes after lidar-record-stop.timer (03:00); the archive reclaims the
+# session only after its upload is sha256-verified, ~04:30-05:00.
+OnCalendar=*-*-* 03:10:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target

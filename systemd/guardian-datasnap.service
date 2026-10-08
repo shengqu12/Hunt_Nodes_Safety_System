@@ -1,0 +1,9 @@
+[Unit]
+Description=Snapshot the stopped recording session's per-node rates before it is reclaimed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/lidar-node-guardian/server/data_report.py snapshot
+Environment=GUARDIAN_HOME=%h/lidar-node-guardian
+Nice=10
+IOSchedulingClass=idle

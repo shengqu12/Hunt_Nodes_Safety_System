@@ -1,0 +1,13 @@
+[Unit]
+Description=Post the data-collection report after archive + reclaim (2026-10-09 .. 10-15)
+
+[Timer]
+# After the 03:00 stop, the nightly archive (done ~04:30-05:00) and the
+# lidar-reclaim.timer backstop at 07:30; before the 08:00 recording start and
+# the 08:30 morning brief. data_report.py disables this timer itself after
+# the 2026-10-15 report.
+OnCalendar=*-*-* 07:45:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target
