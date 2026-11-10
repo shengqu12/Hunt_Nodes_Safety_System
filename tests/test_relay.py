@@ -218,5 +218,48 @@ class TestBootRelay(_NodeCase):
         self.assertNotIn("RELAY USB MISSING", self.node.log)
 
 
+class TestMonitorRelay(unittest.TestCase):
+    """server/monitor.sh against one stub node whose status.json says relay_missing."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        tmp = Path(self._td.name)
+        self.node = Node(tmp)                       # for the stubs only
+        (tmp / "config").mkdir()
+        (tmp / "config" / "server.env").write_text('RECORDING_ALERTS="0"\nMAIL_TO=""\nSLACK_WEBHOOK_URL=""\n')
+        (tmp / "config" / "nodes.list").write_text("nodeT 192.0.2.10 kelrod\n")
+        self.sstate = tmp / "server_state"
+        self.status_file = tmp / "status.json"
+        self.tmp = tmp
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _pass(self, lidar_status: str, note: str = ""):
+        self.status_file.write_text(json.dumps({
+            "node": "nodeT", "timestamp": int(time.time()), "lidar_status": lidar_status,
+            "consecutive_fails": 4, "disk_used_pct": 40, "note": note}, indent=2))
+        env = dict(os.environ)
+        env.update(PATH=f"{self.node.stubs}:{env['PATH']}", GUARDIAN_HOME=str(self.tmp),
+                   SERVER_STATE_DIR=str(self.sstate), SSH_STATUS_FILE=str(self.status_file),
+                   PING_RC="0")
+        r = subprocess.run(["bash", str(SERVER / "monitor.sh")], env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def _alerts(self) -> str:
+        f = self.sstate / "alerts.log"
+        return f.read_text() if f.exists() else ""
+
+    def test_relay_missing_alerts_with_cooldown_and_recovers(self):
+        self._pass("relay_missing", "relay command failed: device /dev/serial/x does not exist")
+        self.assertEqual(self._alerts().count("RELAY USB MISSING on nodeT"), 1)
+        self._pass("relay_missing")                                  # inside the cooldown
+        self.assertEqual(self._alerts().count("RELAY USB MISSING on nodeT"), 1)
+        self._pass("ok")
+        self.assertIn("RECOVERED: relay on nodeT", self._alerts())
+        self.assertEqual((self.sstate / "active_relay_nodeT").read_text().strip(), "0")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

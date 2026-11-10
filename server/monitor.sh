@@ -115,6 +115,20 @@ while read -r name ip user; do
             "RECOVERED: LiDAR on $name healthy" "$name reports lidar_status=ok."
     fi
 
+    # The node's last LiDAR power command failed (relay USB missing, or the
+    # command itself errored): it cannot power-cycle its LiDAR, and a reboot
+    # leaves the LiDAR off. Its own alert type, separate from lidar_<node>.
+    if [[ "$lidar" == "relay_missing" ]]; then
+        note=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("note",""))' \
+               "$status_json" 2>/dev/null)
+        alert_once "relay_$name" \
+            "RELAY USB MISSING on $name — relay command failed, LiDAR power cannot be controlled" \
+            "$name reports lidar_status=relay_missing: its last LiDAR power command failed, so the watchdog cannot power-cycle the LiDAR and a reboot will leave it off.${note:+ Node says: $note.} Check the CH340 relay's USB cable; guardian.env must name it by /dev/serial/by-id/."
+    elif [[ -n "$lidar" ]]; then
+        recover_if_active "relay_$name" \
+            "RECOVERED: relay on $name" "$name reports lidar_status=$lidar, no longer relay_missing."
+    fi
+
     log "$name ok: lidar=$lidar disk=${disk}%"
 done < "$NODES"
 
