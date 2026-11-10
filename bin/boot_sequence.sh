@@ -18,6 +18,7 @@ state_set boot_complete 0
 state_set consecutive_fails 0
 state_set cycles_in_window 0
 state_set window_start "$(date +%s)"
+state_set relay_state ok            # one relay_missing alert per boot at most
 write_status "unknown" "booting" "boot sequence started"
 
 # 1. Deterministic starting state: LiDAR off.
@@ -63,19 +64,26 @@ fi
 
 # 3. Extra guard delay, then power on the LiDAR.
 sleep "${PRE_LIDAR_DELAY_SECS:-10}"
-"$SCRIPT_DIR/lidar_power.sh" on
+relay=1
+"$SCRIPT_DIR/lidar_power.sh" on || relay=0
 
-# Wait for the LiDAR to answer on Ethernet.
+# Wait for the LiDAR to answer on Ethernet (pointless if nothing was switched:
+# the relay drops open at every reboot, so the LiDAR is off).
 ok=0
-deadline=$(( $(date +%s) + ${LIDAR_BOOT_TIMEOUT_SECS:-120} ))
-while (( $(date +%s) < deadline )); do
-    if ping -c1 -W2 "${LIDAR_IP:?set LIDAR_IP in guardian.env}" >/dev/null 2>&1; then
-        ok=1; break
-    fi
-    sleep 3
-done
+if (( relay )); then
+    relay_succeeded
+    deadline=$(( $(date +%s) + ${LIDAR_BOOT_TIMEOUT_SECS:-120} ))
+    while (( $(date +%s) < deadline )); do
+        if ping -c1 -W2 "${LIDAR_IP:?set LIDAR_IP in guardian.env}" >/dev/null 2>&1; then
+            ok=1; break
+        fi
+        sleep 3
+    done
+fi
 
-if (( ok )); then
+if (( ! relay )); then
+    relay_failed "Boot sequence: the LiDAR power-on command failed, so the LiDAR stays off after this boot"
+elif (( ok )); then
     log INFO "LiDAR reachable at $LIDAR_IP"
     write_status "ok" "complete" "boot sequence finished"
 else

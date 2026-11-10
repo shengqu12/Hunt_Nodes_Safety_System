@@ -167,5 +167,56 @@ class TestLidarPower(_NodeCase):
         self.assertIn("[ERROR] relay command failed:", self.node.log)
 
 
+class TestWatchdogRelay(_NodeCase):
+    def setUp(self):
+        super().setUp()
+        (self.node.state / "kv_boot_complete").write_text("1\n")
+
+    def test_failed_cycle_is_relay_missing_not_a_power_cycle(self):
+        self.node.unplug()
+        r = self.node.run("watchdog.sh")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.node.status()["lidar_status"], "relay_missing")
+        self.assertIn("relay command failed", self.node.status()["note"])
+        self.assertIn(MISSING_ALERT, self.node.log)
+        self.assertEqual(self.node.kv("cycles_in_window", "0"), "0")
+
+    def test_relay_alert_is_raised_once_not_every_minute(self):
+        self.node.unplug()
+        for _ in range(3):
+            self.node.run("watchdog.sh")
+        self.assertEqual(self.node.log.count(MISSING_ALERT), 1)
+        self.assertEqual(self.node.kv("cycles_in_window", "0"), "0")
+
+    def test_replugged_relay_recovers_and_then_counts(self):
+        self.node.unplug()
+        self.node.run("watchdog.sh")
+        self.node.plug()
+        r = self.node.run("watchdog.sh")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("RECOVERED: relay on nodeT", self.node.log)
+        self.assertNotEqual(self.node.status()["lidar_status"], "relay_missing")
+        self.assertEqual(self.node.kv("cycles_in_window", "0"), "1")
+
+
+class TestBootRelay(_NodeCase):
+    def test_boot_with_missing_relay_says_so(self):
+        self.node.unplug()
+        r = self.node.run("boot_sequence.sh")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st = self.node.status()
+        self.assertEqual(st["lidar_status"], "relay_missing")
+        self.assertIn(MISSING_ALERT, self.node.log)
+        self.assertEqual(self.node.kv("boot_complete"), "1")       # the watchdog still takes over
+
+    def test_boot_with_relay_present_powers_on(self):
+        self.node.plug()
+        r = self.node.run("boot_sequence.sh", PING_RC=0)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.node.status()["lidar_status"], "ok")
+        self.assertIn("relay command OK", self.node.log)
+        self.assertNotIn("RELAY USB MISSING", self.node.log)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

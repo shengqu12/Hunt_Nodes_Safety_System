@@ -65,6 +65,35 @@ EOF
     mv "$STATUS_FILE.tmp" "$STATUS_FILE"
 }
 
+# --- relay failures: a power command that did not run -------------------------
+# lidar_power.sh exits non-zero and leaves kv_relay_error when the relay command
+# failed or its device is missing. That is not a power cycle (nothing switched)
+# and not a LiDAR fault: the node cannot control its LiDAR's power at all, and
+# after a reboot the LiDAR stays off. lidar_status=relay_missing says so to the
+# server (monitor.sh alerts relay_<node>); the node alerts once per episode.
+json_safe() { tr -d '"\\' <<< "$1" | tr '\n\t' '  '; }
+
+relay_failed() {  # relay_failed CONTEXT [BOOT_STATUS]
+    local ctx="$1" boot="${2:-complete}" err
+    err=$(state_get relay_error "")
+    err="${err:-no error text}"
+    state_set lidar_status relay_missing
+    if [[ "$(state_get relay_state ok)" != "missing" ]]; then
+        state_set relay_state missing
+        node_alert "RELAY USB MISSING on ${NODE_NAME:-node} — relay command failed, LiDAR power cannot be controlled" \
+            "$ctx. $err"
+    fi
+    write_status "relay_missing" "$boot" "relay command failed: $(json_safe "$err")"
+}
+
+relay_succeeded() {  # after a power command returned 0
+    if [[ "$(state_get relay_state ok)" == "missing" ]]; then
+        state_set relay_state ok
+        node_alert "RECOVERED: relay on ${NODE_NAME:-node} is switching again" \
+            "A LiDAR power command succeeded after relay_missing."
+    fi
+}
+
 # --- optional node-side Slack alert (email is handled by the lab server) -----
 node_alert() {  # node_alert "SUBJECT" "BODY"
     local subject="$1" body="$2"

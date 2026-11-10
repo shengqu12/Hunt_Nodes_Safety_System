@@ -11,6 +11,9 @@
 #   - at most MAX_POWER_CYCLES cycles per CYCLE_WINDOW_SECS, then give up,
 #     mark FAILED, alert once, and wait for a human (prevents an endless
 #     off/on loop from cooking the sensor or masking a real hardware fault)
+#   - a power cycle whose relay command fails (lidar_power.sh exit != 0) is
+#     NOT counted: status becomes relay_missing, one RELAY USB MISSING alert
+#     per episode, and the next run tries again (that is how a replug shows)
 #   - recovery after a failure sends a recovery notice
 #
 # It also refreshes status.json every run — this is the heartbeat the lab
@@ -78,7 +81,7 @@ if (( healthy )); then
     prev_status="$(state_get lidar_status ok)"
     state_set consecutive_fails 0
     state_set lidar_status ok
-    if [[ "$prev_status" == "failed" || "$prev_status" == "cycling" ]]; then
+    if [[ "$prev_status" == "failed" || "$prev_status" == "cycling" || "$prev_status" == "relay_missing" ]]; then
         node_alert "RECOVERED: LiDAR back online" "LiDAR on ${NODE_NAME:-node} is healthy again."
     fi
     write_status "ok" "complete" ""
@@ -107,11 +110,18 @@ fi
 
 cycles=$(state_get cycles_in_window 0)
 if (( cycles < MAX_POWER_CYCLES )); then
-    state_set cycles_in_window $(( cycles + 1 ))
-    state_set lidar_status cycling
     log WARN "Attempting power cycle $(( cycles + 1 ))/$MAX_POWER_CYCLES"
     write_status "cycling" "complete" "$reason — power cycle $(( cycles + 1 ))"
-    "$SCRIPT_DIR/lidar_power.sh" cycle
+    if ! "$SCRIPT_DIR/lidar_power.sh" cycle; then
+        # Nothing was switched, so this is not a power cycle and does not spend
+        # the MAX_POWER_CYCLES budget. The next run tries again, which is also
+        # how a replugged relay is noticed.
+        relay_failed "Watchdog: $reason; the power-cycle command failed"
+        exit 0
+    fi
+    state_set cycles_in_window $(( cycles + 1 ))
+    state_set lidar_status cycling
+    relay_succeeded
     sleep "${POST_CYCLE_WAIT_SECS:-45}"
     if ping -c2 -W2 "$LIDAR_IP" >/dev/null 2>&1; then
         log INFO "LiDAR recovered after power cycle"
