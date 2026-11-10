@@ -64,7 +64,12 @@ Identify the USB switch backend first:
 lsusb                 # 16c0:05df → usbrelay-style HID relay
 sudo apt install usbrelay && sudo usbrelay      # prints IDs like HURTM_1
 sudo uhubctl          # if it's a power-switchable USB hub instead
+ls -l /dev/serial/by-id/   # CH340/CH341 relay (1a86:7523) → POWER_BACKEND=cmd
 ```
+
+A CH34x relay is named by `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`
+in both commands — never `/dev/serial/by-path/...` (that is one USB jack) or
+`/dev/ttyUSB0`. See `config/guardian.env.example`.
 
 Then test end-to-end **before** trusting a reboot:
 
@@ -187,10 +192,14 @@ systemd/        guardian-boot, guardian-watchdog(.timer), guardian-monitor(.time
                 guardian-report(.timer), guardian-askbot.service
 config/         *.example templates + slack-app-manifest.yaml
                 — real configs are gitignored
-tests/          test_guardian.py
+tests/          test_guardian.py, test_relay.py
 ```
 
 Design notes and the reasoning behind all of it: [`CLAUDE.md`](CLAUDE.md).
 
 Logs: node `/var/lib/lidar-guardian/guardian.log`; server
 `~/.lidar-guardian-server/{monitor,alerts}.log`.
+
+`guardian.log` can contain NUL bytes (node6's did on 2026-11-10; cause not
+established), and plain `grep` then answers "binary file matches" and prints
+nothing. Use `grep -a`, e.g. `sudo grep -a 'relay command' /var/lib/lidar-guardian/guardian.log`.

@@ -39,7 +39,7 @@ them otherwise.
 
 ```json
 {"node": "node2", "timestamp": 1789519378, "time_human": "...",
- "boot_status": "complete", "lidar_status": "ok|degraded|unknown|failed",
+ "boot_status": "complete", "lidar_status": "ok|degraded|unknown|cycling|failed|down|relay_missing",
  "consecutive_fails": 0, "power_cycles_recent": 0,
  "disk_used_pct": 47, "cpu_temp_c": 50, "note": ""}
 ```
@@ -96,8 +96,19 @@ switching the LiDAR's 12 V line. Reference: `relay-control-reference.md` and
 
 - 9600 8N1 raw, four bytes: `0xA0`, channel, state, checksum. Channel 1 is the
   LiDAR. ON `A0 01 01 A2`, OFF `A0 01 00 A1`.
-- Driven through `/dev/serial/by-path/platform-3610000.usb-usb-0:2.3:1.0-port0`,
-  not `/dev/ttyUSB0`, which shifts if another serial device appears.
+- Driven through **`/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`** only —
+  not `/dev/ttyUSB0`, which shifts if another serial device appears, and not
+  `/dev/serial/by-path/...`, which names **one physical USB jack**. Every node
+  used to name `.../by-path/platform-3610000.usb-usb-0:2.3:1.0-port0`; with the
+  relay in any other jack `stty` failed, `lidar_power.sh` returned 1, the relay
+  got nothing, and the log said only "Powering LiDAR ON" (bench, 2026-11-10;
+  node5's relay sits on jack 2.1). The CH341 has no serial number, so the
+  by-id name is identical on every node; it is unique only while a node has a
+  single CH34x adapter.
+- A failed power command is now loud: `[ERROR] relay command failed: <stderr>`
+  in guardian.log, `lidar_status=relay_missing` in status.json, a
+  `RELAY USB MISSING on <node>` alert from the node and from `monitor.sh`
+  (`relay_<node>`), and it never counts as a power cycle.
 - **Write-only.** No acknowledgement, no state query, nothing to poll. The
   only feedback is a click and an LED. So "the bytes were written" is never
   reported as "the LiDAR came up" — carrier is.
@@ -157,8 +168,9 @@ Consequences encoded in the code:
   "power on lidar 5".
 - **node5 keeps `POWER_BACKEND=none`.** Setting it would make
   `guardian-boot.service` power the LiDAR on every boot, reset the node, and
-  boot-loop. node2, node4 and node7 are set to `cmd` with the by-path device,
-  matching node1.
+  boot-loop. node1, node2, node3, node4 and node7 are set to `cmd`; their
+  guardian.env still named the by-path device as of 2026-11-10 (node6 was
+  fixed by hand to by-id that day; node8/node9 were provisioned with by-id).
 - Verification polls **from the lab server**, never over a session held open
   on the node: an action that kills the host must not also kill the record of
   what it did. A changed `boot_id` is the signal, and it is reported as
@@ -228,6 +240,7 @@ with a matching RECOVERED notice:
 | `nostatus_<node>` | pings, but `status.json` unreadable over SSH |
 | `stale_<node>` | heartbeat older than `HEARTBEAT_MAX_AGE` (300s) |
 | `lidar_<node>` | `lidar_status == failed` |
+| `relay_<node>` | `lidar_status == relay_missing`: the node's last LiDAR power command failed |
 | `recording_down` | inside the window, no session on puget |
 
 Delivery is `alert.sh`: msmtp plus a Slack **incoming webhook**. That webhook
