@@ -71,7 +71,7 @@ EOF
 # and not a LiDAR fault: the node cannot control its LiDAR's power at all, and
 # after a reboot the LiDAR stays off. lidar_status=relay_missing says so to the
 # server (monitor.sh alerts relay_<node>); the node alerts once per episode.
-json_safe() { tr -d '"\\' <<< "$1" | tr '\n\t' '  '; }
+json_safe() { printf '%s' "$1" | tr -d '"\\' | tr '\n\t' '  '; }
 
 relay_failed() {  # relay_failed CONTEXT [BOOT_STATUS]
     local ctx="$1" boot="${2:-complete}" err

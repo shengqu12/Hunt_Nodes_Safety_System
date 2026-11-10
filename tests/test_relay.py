@@ -177,7 +177,9 @@ class TestWatchdogRelay(_NodeCase):
         r = self.node.run("watchdog.sh")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.node.status()["lidar_status"], "relay_missing")
-        self.assertIn("relay command failed", self.node.status()["note"])
+        note = self.node.status()["note"]
+        self.assertIn("relay command failed: device ", note)
+        self.assertEqual(note, note.strip())                         # no dangling space in the alert text
         self.assertIn(MISSING_ALERT, self.node.log)
         self.assertEqual(self.node.kv("cycles_in_window", "0"), "0")
 
