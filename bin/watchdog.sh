@@ -121,6 +121,7 @@ if (( cycles < MAX_POWER_CYCLES )); then
     fi
     state_set cycles_in_window $(( cycles + 1 ))
     state_set lidar_status cycling
+    write_status "cycling" "complete" "$reason — power cycle $(( cycles + 1 ))"
     relay_succeeded
     sleep "${POST_CYCLE_WAIT_SECS:-45}"
     if ping -c2 -W2 "$LIDAR_IP" >/dev/null 2>&1; then

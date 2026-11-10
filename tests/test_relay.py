@@ -199,6 +199,7 @@ class TestWatchdogRelay(_NodeCase):
         self.assertIn("RECOVERED: relay on nodeT", self.node.log)
         self.assertNotEqual(self.node.status()["lidar_status"], "relay_missing")
         self.assertEqual(self.node.kv("cycles_in_window", "0"), "1")
+        self.assertEqual(self.node.status()["power_cycles_recent"], 1)   # status.json agrees
 
 
 class TestBootRelay(_NodeCase):
