@@ -58,6 +58,24 @@ sudo ./install_node.sh
 sudo nano /opt/lidar-guardian/config/guardian.env   # NODE_NAME, LIDAR_IP, POWER_BACKEND
 ```
 
+**Required on every node: logind `RemoveIPC=no`.** With the default (`yes`),
+logind deletes all of the ROS user's `/dev/shm` files when that user's last
+login session ends. Fast DDS keeps its shared-memory transport there, so ROS
+processes running as that user (systemd units such as `rosbridge` and
+`lidar-driver`) stay "active" but publish nothing. node8 did exactly this
+after a reboot on 2026-11-11. Install the drop-in, then check it:
+
+```bash
+sudo mkdir -p /etc/systemd/logind.conf.d
+printf '[Login]\nRemoveIPC=no\n' | sudo tee /etc/systemd/logind.conf.d/10-keep-ipc.conf
+systemd-analyze cat-config systemd/logind.conf | grep RemoveIPC   # last line: RemoveIPC=no
+```
+
+It takes effect at the next boot (the reboot at the end of this section).
+`sudo systemctl restart systemd-logind` applies it without a reboot, but then
+restart the ROS processes too, because segments that were already deleted
+don't come back.
+
 Identify the USB switch backend first:
 
 ```bash
@@ -106,8 +124,9 @@ password (or your SMTP of choice). Passwordless SSH to every node:
 ## Adding a node
 
 On the new Jetson: clone, `sudo ./install_node.sh`, edit `guardian.env`
-(new `NODE_NAME`, its `LIDAR_IP`, its switch backend). On the server: add one
-line to `nodes.list`. Done.
+(new `NODE_NAME`, its `LIDAR_IP`, its switch backend), and install the
+required logind `RemoveIPC=no` drop-in (see "Install on a Jetson"). On the
+server: add one line to `nodes.list`. Done.
 
 ## Alert reference
 
