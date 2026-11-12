@@ -76,6 +76,29 @@ It takes effect at the next boot (the reboot at the end of this section).
 restart the ROS processes too, because segments that were already deleted
 don't come back.
 
+**Required on nodes that run the Livox driver as `lidar-driver.service`**
+(node8/node9 style; fleet nodes that start the pipeline by hand skip this).
+`install_node.sh` installs it automatically when that unit exists. It installs
+two drop-ins and one helper, keeps identical files, and stops on a different
+one:
+
+- `systemd/lidar-driver.service.d/10-after-guardian.conf` installs to
+  `/etc/systemd/system/lidar-driver.service.d/` and sets
+  `Wants=`/`After=guardian-boot.service`. guardian-boot turns the relay OFF at
+  boot, which takes the LiDAR link and its host IP down. The Livox SDK binds
+  that IP only once (`bind failed`, `Init lds lidar fail!`) and then idles
+  forever. node8 sent no frames after a reboot on 2026-11-12.
+- `systemd/lidar-driver.service.d/20-initcheck.conf` plus
+  `systemd/lidar-driver-initcheck` (installed to `/usr/local/sbin/`) add an
+  `ExecStartPost`. If the start logs `Init lds lidar fail` within 60 s, the
+  start fails, so `Restart=always` retries instead of leaving the process
+  idle.
+
+Check: `systemctl show lidar-driver -p After -p Wants` lists
+`guardian-boot.service`. After a reboot, the driver should start right after
+guardian-boot's "boot_sequence done". After a guardian power cycle, a running
+driver recovers on its own, with one burst of queued frames.
+
 Identify the USB switch backend first:
 
 ```bash
@@ -208,7 +231,8 @@ bin/askbot.py   the Slack ask-bot                                       (lab ser
 bin/lib/        probe.py, diagnose.py, llm.py, common.py — the bot's guts
 server/         monitor.sh, daily_report.sh, alert.sh, recording_status.sh
 systemd/        guardian-boot, guardian-watchdog(.timer), guardian-monitor(.timer),
-                guardian-report(.timer), guardian-askbot.service
+                guardian-report(.timer), guardian-askbot.service;
+                lidar-driver.service.d/ + lidar-driver-initcheck (ROS-unit nodes only)
 config/         *.example templates + slack-app-manifest.yaml
                 — real configs are gitignored
 tests/          test_guardian.py, test_relay.py

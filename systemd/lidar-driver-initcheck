@@ -1,0 +1,12 @@
+#!/bin/bash
+# lidar-driver-initcheck (2026-11-12): ExecStartPost of lidar-driver.service. Watches this invocation's journal for up
+# to 60 s: exit 1 on "Init lds lidar fail" (unit fails, Restart=always acts), exit 0 on "Init lds lidar success" or at 60 s.
+for i in $(seq 60); do
+    out=$(journalctl -q -o cat _SYSTEMD_INVOCATION_ID="$INVOCATION_ID" 2>/dev/null)
+    if grep -q 'Init lds lidar fail' <<<"$out"; then
+        echo "lidar-driver-initcheck: 'Init lds lidar fail' after ${i}s; failing this start so Restart= retries"; exit 1
+    fi
+    grep -q 'Init lds lidar success' <<<"$out" && { echo "lidar-driver-initcheck: Init lds lidar success after ${i}s"; exit 0; }
+    sleep 1
+done
+echo "lidar-driver-initcheck: no Init line within 60 s; leaving the unit running"; exit 0

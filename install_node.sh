@@ -41,6 +41,40 @@ else
     echo ">>> Installed $IPC_FILE (RemoveIPC=no; effective at the next boot)"
 fi
 
+# ROS units only (nodes that run the Livox driver as lidar-driver.service, e.g. node8/node9; fleet nodes that start
+# the pipeline by hand over SSH have no such unit and skip this). Two drop-ins + one helper (node8, 2026-11-12):
+#   10-after-guardian.conf  Wants/After=guardian-boot.service: guardian-boot turns the relay OFF at boot, NetworkManager
+#                           drops host_ip, and the Livox SDK binds once ("bind failed") and never retries.
+#   20-initcheck.conf       ExecStartPost=+/usr/local/sbin/lidar-driver-initcheck: fail the start on
+#                           "Init lds lidar fail" so Restart=always acts instead of a live process that never publishes.
+# Idempotent: identical files are kept; a different existing file stops the installer before anything is written.
+if [[ -f /etc/systemd/system/lidar-driver.service ]]; then
+    LD_PAIRS=(
+        "$SRC/systemd/lidar-driver.service.d/10-after-guardian.conf:/etc/systemd/system/lidar-driver.service.d/10-after-guardian.conf:644"
+        "$SRC/systemd/lidar-driver.service.d/20-initcheck.conf:/etc/systemd/system/lidar-driver.service.d/20-initcheck.conf:644"
+        "$SRC/systemd/lidar-driver-initcheck:/usr/local/sbin/lidar-driver-initcheck:755"
+    )
+    for p in "${LD_PAIRS[@]}"; do
+        IFS=: read -r s d m <<<"$p"
+        if [[ -e "$d" ]] && ! cmp -s "$s" "$d"; then
+            echo "ERROR: $d exists with different content; fix it by hand (want: $s)" >&2
+            exit 1
+        fi
+    done
+    mkdir -p /etc/systemd/system/lidar-driver.service.d
+    for p in "${LD_PAIRS[@]}"; do
+        IFS=: read -r s d m <<<"$p"
+        if [[ -e "$d" ]]; then
+            echo "Keeping existing $d"
+        else
+            install -m "$m" -o root -g root "$s" "$d"
+            echo ">>> Installed $d"
+        fi
+    done
+else
+    echo "No /etc/systemd/system/lidar-driver.service: skipping the lidar-driver drop-ins (pipeline started by hand)"
+fi
+
 cp "$SRC/systemd/guardian-boot.service" \
    "$SRC/systemd/guardian-watchdog.service" \
    "$SRC/systemd/guardian-watchdog.timer" /etc/systemd/system/
