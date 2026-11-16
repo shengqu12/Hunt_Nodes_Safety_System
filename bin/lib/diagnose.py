@@ -318,7 +318,7 @@ def _fleet(bundle: Bundle, conf: dict, nodes: list, state, detailed: bool) -> No
         elif res.get("lidar_carrier") == "0":
             groups.setdefault("LiDAR link has no carrier", []).append(name)
 
-        if res.get("relay_tty") == "":
+        if res.get("relay_tty") == "" and res.get("power_backend") != "none":
             groups.setdefault("no relay serial device", []).append(name)
 
         if res.get("udp56301") != "bound":
@@ -577,10 +577,16 @@ def _node_facts(bundle: Bundle, res: dict, stale_max: int, disk_warn: int,
                    f"{res.get('lidar_link_ip') or '(none assigned)'}")
 
     relay = res.get("relay_tty", "")
-    bundle.add(f"{name} relay serial device", relay or "ABSENT",
-               "ok" if relay else "bad",
-               "what the power switch is driven through. Absent means this "
-               "node's LiDAR cannot be switched at all")
+    if res.get("power_backend") == "none" and not relay:
+        bundle.add(f"{name} relay serial device",
+                   "not used (POWER_BACKEND=none)", "ok",
+                   "monitor-only node: no relay is fitted, its LiDAR is on "
+                   "permanent power and cannot be switched remotely")
+    else:
+        bundle.add(f"{name} relay serial device", relay or "ABSENT",
+                   "ok" if relay else "bad",
+                   "what the power switch is driven through. Absent means "
+                   "this node's LiDAR cannot be switched at all")
 
     port = res.get("udp56301", "?")
     bundle.add(f"{name} UDP 56301", port,

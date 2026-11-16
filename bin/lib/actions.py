@@ -165,6 +165,11 @@ def _one_node(node: dict, verb: str, conf: dict) -> dict:
                        f"{before.get('error', 'no telemetry')}"}
 
     tty = before.get("relay_tty") or ""
+    if not tty and before.get("power_backend") == "none":
+        return {"outcome": "refused",
+                "why": "this node is POWER_BACKEND=none (monitor-only): no "
+                       "relay is fitted and its LiDAR is on permanent power, "
+                       "so it cannot be switched remotely"}
     if not tty:
         return {"outcome": "refused",
                 "why": "no relay serial device on this node, so its LiDAR "

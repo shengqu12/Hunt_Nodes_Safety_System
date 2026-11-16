@@ -393,6 +393,8 @@ else
 fi
 printf 'BOOT_ID=%s\n' "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
 printf 'LOAD1=%s\n'   "$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)"
+# POWER_BACKEND=none (node2, node5) means monitor-only: no relay is expected.
+printf 'POWER_BACKEND=%s\n' "$(sed -n 's/^POWER_BACKEND="\{0,1\}\([^"[:space:]]*\).*/\1/p' /opt/lidar-guardian/config/guardian.env 2>/dev/null | tail -1)"
 printf 'RELAY_TTY=%s\n' "$(for d in /dev/serial/by-path/platform-3610000.usb-usb-0:2.3:1.0-port0 /dev/ttyUSB0; do [ -c "$d" ] && { echo "$d"; break; }; done)"
 printf 'WATCHDOG_ACTIVE=%s\n' "$(systemctl is-active guardian-watchdog.timer 2>/dev/null)"
 # Converted to epoch seconds HERE, by the same date(1) that formatted it, and
@@ -458,6 +460,7 @@ def node_probe(node: dict, conf: dict, timeout: float = 20.0) -> dict:
     result["boot_id"] = fields.get("BOOT_ID", "")
     result["load1"] = fields.get("LOAD1", "")
     result["relay_tty"] = fields.get("RELAY_TTY", "")
+    result["power_backend"] = fields.get("POWER_BACKEND", "")
     result["watchdog_timer"] = fields.get("WATCHDOG_ACTIVE", "?")
     watchdog_epoch = _as_int(fields.get("WATCHDOG_LAST_EPOCH"))
     result["boot_unit"] = fields.get("BOOTUNIT", "?")
