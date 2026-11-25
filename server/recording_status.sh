@@ -51,6 +51,53 @@ print(",".join(d for d in order if d in days) if days else "unknown")
 PY
 }
 
+# _rec_schedule STOP_HOUR -- the start timer's schedule as people read it, e.g.
+# "Mon-Fri 08:00, Sat 10:00, Sun 12:00; stop 03:00". Built from the timer's own
+# OnCalendar lines; lines that only re-fire before the stop hour (the 00..02
+# catch-up inside a running night) are not starts and are left out. Falls back
+# to the old "start:00-stop:00 days" text when the timer cannot be read. (2026-11-25)
+_rec_schedule() {
+    local unit="${RECORD_START_TIMER:-lidar-record-start.timer}" cal
+    cal=$(systemctl --user show -p TimersCalendar --value "$unit" 2>/dev/null)
+    if [[ -n "$cal" ]] && command -v python3 >/dev/null; then
+        CAL="$cal" STOP="$1" python3 <<'PY' 2>/dev/null && return
+import os, re, sys
+order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+stop = int(os.environ["STOP"])
+starts = {}
+for spec in re.findall(r"OnCalendar=([^;]+?)\s*;", os.environ["CAL"]):
+    m = re.match(r"(?:(\S+)\s+)?\*-\*-\*\s+(\d+)(?:\.\.\d+)?:00:00$", spec.strip())
+    if not m:
+        sys.exit(1)
+    h0 = int(m.group(2))
+    if h0 < stop:
+        continue
+    days = set(order) if m.group(1) is None else set()
+    for part in (m.group(1) or "").split(",") if m.group(1) else []:
+        a, _, b = part.partition("..")
+        i, j = order.index(a), order.index(b or a)
+        days.update(order[i:j + 1] if i <= j else order[i:] + order[:j + 1])
+    for d in days:
+        starts[d] = min(starts.get(d, 99), h0)
+if not starts:
+    sys.exit(1)
+out, i = [], 0
+while i < 7:
+    d = order[i]
+    if d not in starts:
+        i += 1
+        continue
+    j = i
+    while j + 1 < 7 and starts.get(order[j + 1]) == starts[d]:
+        j += 1
+    out.append((d if i == j else f"{d}-{order[j]}") + f" {starts[d]:02d}:00")
+    i = j + 1
+print(", ".join(out) + f"; stop {stop:02d}:00")
+PY
+    fi
+    echo "$(_rec_conf RECORD_START_HOUR 7):00-${1}:00 $(_rec_days)"
+}
+
 # _sd VERB UNIT [ARGS] — ask systemd one question, falling back to `unknown`
 # only when it answered with nothing at all.
 #
@@ -103,6 +150,7 @@ recording_probe() {
     days=$(_rec_days)
     echo "WINDOW=${start}:00-${stop}:00"
     echo "DAYS=$days"
+    echo "SCHEDULE=$(_rec_schedule "$stop")"
     echo "TODAY=$today"
     echo "HOUR=$hour"
 

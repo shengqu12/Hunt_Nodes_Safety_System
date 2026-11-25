@@ -76,7 +76,7 @@ elif [[ -n "$rec_session" && "$rec_session" != "none" ]]; then
 elif [[ "$(rk IN_WINDOW)" == "yes" ]]; then
     # Scheduled to be recording, and not. Name every measured reason; the
     # reasons are independent and more than one can be true at once.
-    REC_LINE=":rotating_light: *Recording: NOT RUNNING* — scheduled now ($(rk WINDOW) $(rk DAYS))"
+    REC_LINE=":rotating_light: *Recording: NOT RUNNING* — scheduled now ($(rk SCHEDULE))"
     [[ "$(rk START_TIMER)" != "active" ]] && \
         REC_LINE+=$'\n'"    $REC_UNIT is $(rk START_TIMER) (unit file: $(rk START_TIMER_ENABLED)) — nothing will fire it"
     [[ "$(rk REFUSED)" == "yes" ]] && \
@@ -86,7 +86,7 @@ elif [[ "$(rk IN_WINDOW)" == "yes" ]]; then
         REC_LINE+=$'\n'"    ${free_gb} GB free < ${need_gb} GB needed to start a day"
     fi
 elif [[ "$(rk IN_WINDOW)" == "no" ]]; then
-    REC_LINE="*Recording:* idle, as scheduled ($(rk WINDOW) $(rk DAYS); today is $(rk TODAY))"
+    REC_LINE="*Recording:* idle, as scheduled ($(rk SCHEDULE); today is $(rk TODAY))"
 else
     REC_LINE="*Recording:* no session running; could not determine whether one is due"
 fi
